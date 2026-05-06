@@ -47,7 +47,11 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
         window_sum = rain[i - w + 1 : i + 1].sum()
         yr = times[i].year   # year at END of window (VBA behavior)
 
-        if yr not in ams or window_sum > amsams[yr] = window_sum
+        if yr not in ams:
+            ams[yr] = window_sum
+        elif window_sum > ams[yr]:
+            ams[yr] = window_sum
+
 
     return ams
 
