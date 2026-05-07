@@ -100,7 +100,7 @@ def lognormal_q(x, T):
     return lognorm.ppf(1 - 1 / T, shape, loc, scale)
 
 # =====================================================
-# ✅ HEC‑HMS FREQUENCY STORM (NESTED / BALANCED ABM)
+# ✅ HEC‑HMS FREQUENCY STORM (NESTED ABM)
 # =====================================================
 def hms_frequency_storm(ddf_row, timestep_min, peak_position=0.5):
 
@@ -146,22 +146,21 @@ def hms_frequency_storm(ddf_row, timestep_min, peak_position=0.5):
     return df
 
 # =====================================================
-# UI – CONTROL PANEL (ORDERED AS REQUESTED)
+# UI – CONTROL PANEL (ORDERED)
 # =====================================================
 st.title("🌧️ AMS / DDF / IDF / HEC‑HMS Frequency Storm")
 
 with st.sidebar:
 
-    # ---- Interval ----
     interval = st.number_input(
         "Data interval / timestep (minutes)",
         min_value=1,
         value=6
     )
 
-    # ---- AMS Selection ----
+    # ---- AMS ----
     st.markdown("### Select durations for AMS computation")
-    predefined_dur = [5, 10, 15, 30, 60, 120, 360, 720, 1440]
+    predefined_dur = [6, 30, 60, 120, 360, 720, 1440]
     dur_sel = st.multiselect(
         "Predefined durations (min)",
         predefined_dur,
@@ -175,7 +174,7 @@ with st.sidebar:
 
     btn_ams = st.button("Compute AMS")
 
-    # ---- DDF / IDF Selection ----
+    # ---- DDF / IDF ----
     st.markdown("### Select return periods for DDF / IDF computation")
     predefined_T = [2, 5, 10, 20, 30, 50, 100]
     T_sel = st.multiselect(
@@ -204,18 +203,17 @@ with st.sidebar:
     abm_return_periods = st.multiselect(
         "ABM Return periods (years)",
         selected_T,
-        default=selected_T[:1]
+        default=selected_T[:1] if selected_T else []
     )
     abm_durations = st.multiselect(
         "ABM Storm durations (min)",
         durations,
-        default=[max(durations)]
+        default=[max(durations)] if durations else []
     )
 
     btn_abm = st.button("Compute ABM Tables")
     show_abm_plots = st.button("Show ABM Hyetographs")
 
-    # ---- Data Upload ----
     files = st.file_uploader(
         "Upload rainfall files",
         type=["csv", "xlsx"],
@@ -242,7 +240,7 @@ if btn_ams:
     st.dataframe(pd.DataFrame(AMS).round(2))
 
 # =====================================================
-# DDF / IDF OUTPUT (RESTORED, UNCHANGED LOGIC)
+# DDF / IDF OUTPUT
 # =====================================================
 if btn_ddf:
     if "AMS" not in st.session_state:
@@ -298,7 +296,7 @@ if btn_abm:
     st.session_state["ABM_RESULTS"] = ABM_RESULTS
 
 # =====================================================
-# ABM HYETOGRAPHS (ON DEMAND)
+# ABM HYETOGRAPHS
 # =====================================================
 if show_abm_plots:
     if "ABM_RESULTS" not in st.session_state:
