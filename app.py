@@ -54,6 +54,7 @@ def read_rainfall_from_upload(files):
 def compute_ams_vba(times, rain, duration_min, interval_min):
     window = int(duration_min / interval_min)
     years = pd.DatetimeIndex(times).year.to_numpy()
+
     cumsum = np.zeros(len(rain) + 1)
     cumsum[1:] = np.cumsum(rain)
 
@@ -61,9 +62,11 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
     for i in range(window - 1, len(rain)):
         wsum = cumsum[i + 1] - cumsum[i + 1 - window]
         yr = int(years[i])
+
         if yr not in ams:
             ams[yr] = wsum
-        elif wsum > amsams[yr] = wsum
+        elif wsum > ams[yr]:
+            ams[yr] = wsum
 
     return np.array(list(ams.values()), dtype=float)
 
