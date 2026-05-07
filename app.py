@@ -67,16 +67,13 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
     n = len(rain)
 
     years = pd.DatetimeIndex(times).year.to_numpy()
-
     cumsum = np.zeros(n + 1, dtype=float)
     cumsum[1:] = np.cumsum(rain)
 
     ams = {}
-
     for i in range(window - 1, n):
         window_sum = cumsum[i + 1] - cumsum[i + 1 - window]
-        yr = int(years[i])  # END-of-window year (VBA logic)
-
+        yr = int(years[i])
         if yr not in ams or window_sum > ams[yr]:
             ams[yr] = window_sum
 
@@ -97,30 +94,24 @@ with st.sidebar:
         value=6
     )
 
-    # Predefined duration options (NO default selection)
     base_durations = [5, 10, 15, 30, 60, 120, 360, 720, 1440]
-
     selected_durations = st.multiselect(
         "Select durations (minutes)",
         base_durations,
         default=[]
     )
 
-    # Manual duration entry
-    manual_duration = st.number_input(
+    # ✅ Text input allows empty value safely
+    manual_duration_text = st.text_input(
         "Add custom duration (minutes)",
-        min_value=1,
-        value=0,
-        step=1
+        value="",
+        placeholder="e.g. 180"
     )
-
-    if manual_duration > 0 and manual_duration not in selected_durations:
-        st.caption(f"Custom duration {manual_duration} min will be included.")
 
     compute_button = st.button("✅ Compute AMS")
 
 # =====================================================
-# LOAD RAINFALL DATA FROM REPOSITORY
+# LOAD RAINFALL DATA
 # =====================================================
 try:
     times, rain, used_files = read_rainfall_from_repo()
@@ -137,10 +128,14 @@ for f in used_files:
 # =====================================================
 if compute_button:
 
-    # Merge predefined + manual durations
-    durations = selected_durations.copy()
-    if manual_duration > 0:
-        durations.append(manual_duration)
+    durations = list(selected_durations)
+
+    if manual_duration_text.strip():
+        if manual_duration_text.isdigit():
+            durations.append(int(manual_duration_text))
+        else:
+            st.error("Custom duration must be a positive integer.")
+            st.stop()
 
     if not durations:
         st.warning("Please select or enter at least one duration.")
@@ -149,7 +144,6 @@ if compute_button:
     st.subheader("📊 Annual Maximum Series (AMS)")
 
     ams_table = {}
-
     for d in sorted(set(durations)):
         ams_dict = compute_ams_vba(times, rain, d, interval)
         ams_table[f"{d} min"] = pd.Series(ams_dict)
