@@ -26,7 +26,7 @@ def sort_files_by_numeric_suffix(files):
     return sorted(files, key=extract_index)
 
 # =====================================================
-# READ RAINFALL DATA FROM REPOSITORY
+# READ RAINFALL DATA
 # =====================================================
 @st.cache_data(show_spinner="Reading rainfall data from repository...")
 def read_rainfall_from_repo():
@@ -36,18 +36,16 @@ def read_rainfall_from_repo():
 
     files = sort_files_by_numeric_suffix(files)
 
-    all_times = []
-    all_rain = []
-
+    all_times, all_rain = [], []
     for f in files:
         df = pd.read_csv(f) if f.suffix.lower() == ".csv" else pd.read_excel(f)
         df.columns = df.columns.str.lower()
 
-        time_col = next(c for c in df.columns if "time" in c or "date" in c)
-        rain_col = next(c for c in df.columns if "rain" in c)
+        tcol = next(c for c in df.columns if "time" in c or "date" in c)
+        rcol = next(c for c in df.columns if "rain" in c)
 
-        t = pd.to_datetime(df[time_col], errors="coerce")
-        r = pd.to_numeric(df[rain_col], errors="coerce")
+        t = pd.to_datetime(df[tcol], errors="coerce")
+        r = pd.to_numeric(df[rcol], errors="coerce")
 
         mask = t.notna() & r.notna()
         all_times.append(t[mask])
@@ -55,7 +53,6 @@ def read_rainfall_from_repo():
 
     times = pd.concat(all_times, ignore_index=True).to_numpy()
     rain = pd.concat(all_rain, ignore_index=True).to_numpy()
-
     return times, rain, files
 
 # =====================================================
@@ -64,7 +61,6 @@ def read_rainfall_from_repo():
 def compute_ams_vba(times, rain, duration_min, interval_min):
     window = int(duration_min / interval_min)
     n = len(rain)
-
     years = pd.DatetimeIndex(times).year.to_numpy()
     cumsum = np.zeros(n + 1)
     cumsum[1:] = np.cumsum(rain)
@@ -73,7 +69,6 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
     for i in range(window - 1, n):
         wsum = cumsum[i + 1] - cumsum[i + 1 - window]
         yr = int(years[i])
-
         if yr not in ams:
             ams[yr] = wsum
         elif wsum > ams[yr]:
@@ -85,8 +80,8 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
 # DISTRIBUTIONS
 # =====================================================
 def gumbel_excel_q(x, T):
-    xbar = x.mean()
-    s = x.std(ddof=1)  # STDEV.S
+    xbar = x.mean()                 # AVERAGE
+    s = x.std(ddof=1)               # STDEV.S
     yT = -np.log(np.log(T / (T - 1.0)))
     KT = (yT - EULER_GAMMA) / SIGMA_Y
     return xbar + KT * s
@@ -111,13 +106,7 @@ st.title("🌧️ AMS / DDF / IDF Generator")
 st.caption("Dynamic AMS with Excel/VBA‑matched Gumbel DDF/IDF")
 
 with st.sidebar:
-    st.header("Inputs")
-
-    interval = st.number_input(
-        "Data interval (minutes)",
-        min_value=1,
-        value=6
-    )
+    interval = st.number_input("Data interval (minutes)", min_value=1, value=6)
 
     durations = st.multiselect(
         "Durations (minutes)",
@@ -131,13 +120,10 @@ with st.sidebar:
     selected_T = st.multiselect(
         "Return periods (years)",
         st.session_state.return_periods,
-        default=[2, 10, 30, 50, 100]
+        default=[2, 5, 10, 20, 30, 50, 100]   # ✅ pre‑selected
     )
 
-    custom_T = st.text_input(
-        "Add custom return periods",
-        placeholder="e.g. 25, 75"
-    )
+    custom_T = st.text_input("Add custom return periods (years)")
 
     if custom_T:
         for v in custom_T.split(","):
@@ -162,32 +148,16 @@ with st.sidebar:
 # =====================================================
 times, rain, used_files = read_rainfall_from_repo()
 
-st.sidebar.markdown("**Rainfall files used:**")
-for f in used_files:
-    st.sidebar.write(f.name)
-
 # =====================================================
 # AMS
 # =====================================================
 if btn_ams:
-
-    if not durations:
-        st.warning("Select at least one duration.")
-        st.stop()
-
-    st.subheader("📊 Annual Maximum Series (AMS)")
-
     ams_data = {}
     for d in durations:
         ams_data[d] = compute_ams_vba(times, rain, d, interval)
-
     st.session_state["AMS_DATA"] = ams_data
-
-    ams_df = pd.DataFrame(
-        {f"AMS_{d}min": ams_data[d] for d in durations}
-    )
-
-    st.dataframe(ams_df, use_container_width=True)
+    ams_df = pd.DataFrame({f"AMS_{d}min": ams_data[d] for d in durations})
+    st.dataframe(ams_df.round(2), use_container_width=True)
 
 # =====================================================
 # DDF / IDF
@@ -196,10 +166,6 @@ if btn_ddf:
 
     if "AMS_DATA" not in st.session_state:
         st.warning("Please compute AMS first.")
-        st.stop()
-
-    if not selected_T or not distributions:
-        st.warning("Select return periods and distributions.")
         st.stop()
 
     for dist in distributions:
@@ -219,13 +185,11 @@ if btn_ddf:
                     vals.append(lognormal_q(x, T))
             ddf[d] = vals
 
-        ddf_df = pd.DataFrame(ddf, index=selected_T).T
-        ddf_df.index.name = "Duration (min)"
-
+        ddf_df = pd.DataFrame(ddf, index=selected_T).T.round(2)
         st.markdown("**Rainfall Depth (mm)**")
         st.dataframe(ddf_df, use_container_width=True)
 
-        idf_df = ddf_df.div(ddf_df.index.values / 60.0, axis=0)
-
+        idf_df = ddf_df.div(ddf_df.index.values / 60.0, axis=0).round(2)
         st.markdown("**Rainfall Intensity (mm/hr)**")
         st.dataframe(idf_df, use_container_width=True)
+``
