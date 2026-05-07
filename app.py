@@ -23,11 +23,14 @@ def sort_files_by_numeric_suffix(files):
     return sorted(files, key=extract_index)
 
 # =====================================================
-# Read rainfall data (UPLOAD ONLY)
+# Read rainfall data from UPLOADS ONLY (VBA-compatible)
+#   - Preserves row order
+#   - No chronological sorting
 # =====================================================
 @st.cache_data(show_spinner="Reading uploaded rainfall data...")
 def read_rainfall_from_upload(files):
-    frames = []
+    all_times = []
+    all_rain = []
 
     for f in files:
         df = pd.read_csv(f) if f.name.lower().endswith(".csv") else pd.read_excel(f)
@@ -36,24 +39,22 @@ def read_rainfall_from_upload(files):
         time_col = next(c for c in df.columns if "time" in c or "date" in c)
         rain_col = next(c for c in df.columns if "rain" in c)
 
-        df = df[[time_col, rain_col]].copy()
-        df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
-        df[rain_col] = pd.to_numeric(df[rain_col], errors="coerce")
+        t = pd.to_datetime(df[time_col], errors="coerce")
+        r = pd.to_numeric(df[rain_col], errors="coerce")
 
-        df.dropna(inplace=True)
-        df.columns = ["time", "rain"]
+        mask = t.notna() & r.notna()
+        all_times.append(t[mask])
+        all_rain.append(r[mask])
 
-        frames.append(df)
+    times = pd.concat(all_times, ignore_index=True).to_numpy()
+    rain = pd.concat(all_rain, ignore_index=True).to_numpy()
 
-    merged = pd.concat(frames, ignore_index=True)
-
-    # ✅ chronological ordering
-    merged.sort_values("time", inplace=True)
-
-    return merged["time"].to_numpy(), merged["rain"].to_numpy()
+    return times, rain
 
 # =====================================================
-# AMS (VBA compatible)
+# AMS (EXACT VBA LOGIC)
+#   - Rolling sum by row order
+#   - Year taken from end of window
 # =====================================================
 def compute_ams_vba(times, rain, duration_min, interval_min):
     window = int(duration_min / interval_min)
@@ -64,13 +65,13 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
 
     ams = {}
     for i in range(window - 1, len(rain)):
-        value = cumsum[i + 1] - cumsum[i + 1 - window]
+        wsum = cumsum[i + 1] - cumsum[i + 1 - window]
         yr = int(years[i])
 
         if yr not in ams:
-            ams[yr] = value
-        elif value > ams[yr]:
-            ams[yr] = value
+            ams[yr] = wsum
+        elif wsum > ams[yr]:
+            ams[yr] = wsum
 
     return np.array(list(ams.values()), dtype=float)
 
@@ -103,11 +104,7 @@ def lognormal_q(x, T):
 st.title("🌧️ AMS / DDF / IDF Generator")
 
 with st.sidebar:
-    interval = st.number_input(
-        "Data interval (minutes)",
-        min_value=1,
-        value=6
-    )
+    interval = st.number_input("Data interval (minutes)", min_value=1, value=6)
 
     durations = st.multiselect(
         "Durations (minutes)",
@@ -141,7 +138,7 @@ with st.sidebar:
     )
 
     files = st.file_uploader(
-        "Upload rainfall files (CSV / Excel)",
+        "Upload rainfall files (CSV or Excel)",
         type=["csv", "xlsx"],
         accept_multiple_files=True
     )
@@ -168,11 +165,7 @@ if btn_ams:
         ams_data[d] = compute_ams_vba(times, rain, d, interval)
 
     st.session_state["AMS_DATA"] = ams_data
-
-    ams_df = pd.DataFrame(
-        {f"AMS_{d}min": ams_data[d] for d in durations}
-    ).round(2)
-
+    ams_df = pd.DataFrame({f"AMS_{d}min": ams_data[d] for d in durations}).round(2)
     st.dataframe(ams_df, use_container_width=True)
 
 # =====================================================
@@ -189,25 +182,23 @@ if btn_ddf:
 
         ddf = {}
         for d, x in st.session_state["AMS_DATA"].items():
-            values = []
+            vals = []
             for T in selected_T:
                 if dist == "Gumbel":
-                    values.append(gumbel_excel_q(x, T))
+                    vals.append(gumbel_excel_q(x, T))
                 elif dist == "GEV":
-                    values.append(gev_q(x, T))
+                    vals.append(gev_q(x, T))
                 elif dist == "LP-III":
-                    values.append(lp3_q(x, T))
+                    vals.append(lp3_q(x, T))
                 elif dist == "Lognormal":
-                    values.append(lognormal_q(x, T))
-            ddf[d] = values
+                    vals.append(lognormal_q(x, T))
+            ddf[d] = vals
 
         ddf_df = pd.DataFrame(ddf, index=selected_T).T.round(2)
         ddf_df.index.name = "Duration (min)"
-
         st.markdown("**Rainfall Depth (mm)**")
         st.dataframe(ddf_df, use_container_width=True)
 
         idf_df = ddf_df.div(ddf_df.index.values / 60.0, axis=0).round(2)
-
         st.markdown("**Rainfall Intensity (mm/hr)**")
         st.dataframe(idf_df, use_container_width=True)
