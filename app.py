@@ -11,13 +11,13 @@ st.set_page_config(page_title="AMS / DDF / IDF Generator", layout="wide")
 DATA_DIR = pathlib.Path("data")
 
 # =====================================================
-# CONSTANTS (Excel / VBA Gumbel)
+# CONSTANTS — Excel / VBA Gumbel
 # =====================================================
 EULER_GAMMA = 0.5772156649
-SIGMA_Y = 1.28255  # std dev of reduced variate (Excel)
+SIGMA_Y = 1.28255   # Std dev of reduced variate (Excel)
 
 # =====================================================
-# FILE ORDERING (_1, _2, ...)
+# Helper: sort files Rainfall_Data_1, _2, _3 ...
 # =====================================================
 def sort_files_by_numeric_suffix(files):
     def extract_index(p):
@@ -26,7 +26,7 @@ def sort_files_by_numeric_suffix(files):
     return sorted(files, key=extract_index)
 
 # =====================================================
-# READ RAINFALL DATA
+# Read rainfall data from repository
 # =====================================================
 @st.cache_data(show_spinner="Reading rainfall data from repository...")
 def read_rainfall_from_repo():
@@ -36,16 +36,18 @@ def read_rainfall_from_repo():
 
     files = sort_files_by_numeric_suffix(files)
 
-    all_times, all_rain = [], []
+    all_times = []
+    all_rain = []
+
     for f in files:
         df = pd.read_csv(f) if f.suffix.lower() == ".csv" else pd.read_excel(f)
         df.columns = df.columns.str.lower()
 
-        tcol = next(c for c in df.columns if "time" in c or "date" in c)
-        rcol = next(c for c in df.columns if "rain" in c)
+        time_col = next(c for c in df.columns if "time" in c or "date" in c)
+        rain_col = next(c for c in df.columns if "rain" in c)
 
-        t = pd.to_datetime(df[tcol], errors="coerce")
-        r = pd.to_numeric(df[rcol], errors="coerce")
+        t = pd.to_datetime(df[time_col], errors="coerce")
+        r = pd.to_numeric(df[rain_col], errors="coerce")
 
         mask = t.notna() & r.notna()
         all_times.append(t[mask])
@@ -53,14 +55,16 @@ def read_rainfall_from_repo():
 
     times = pd.concat(all_times, ignore_index=True).to_numpy()
     rain = pd.concat(all_rain, ignore_index=True).to_numpy()
-    return times, rain, files
+
+    return times, rain
 
 # =====================================================
-# AMS (VBA‑COMPATIBLE)
+# AMS — VBA compatible
 # =====================================================
 def compute_ams_vba(times, rain, duration_min, interval_min):
     window = int(duration_min / interval_min)
     n = len(rain)
+
     years = pd.DatetimeIndex(times).year.to_numpy()
     cumsum = np.zeros(n + 1)
     cumsum[1:] = np.cumsum(rain)
@@ -69,6 +73,7 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
     for i in range(window - 1, n):
         wsum = cumsum[i + 1] - cumsum[i + 1 - window]
         yr = int(years[i])
+
         if yr not in ams:
             ams[yr] = wsum
         elif wsum > ams[yr]:
@@ -77,11 +82,11 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
     return np.array(list(ams.values()), dtype=float)
 
 # =====================================================
-# DISTRIBUTIONS
+# Distributions
 # =====================================================
 def gumbel_excel_q(x, T):
-    xbar = x.mean()                 # AVERAGE
-    s = x.std(ddof=1)               # STDEV.S
+    xbar = x.mean()             # AVERAGE
+    s = x.std(ddof=1)           # STDEV.S
     yT = -np.log(np.log(T / (T - 1.0)))
     KT = (yT - EULER_GAMMA) / SIGMA_Y
     return xbar + KT * s
@@ -103,10 +108,14 @@ def lognormal_q(x, T):
 # UI
 # =====================================================
 st.title("🌧️ AMS / DDF / IDF Generator")
-st.caption("Dynamic AMS with Excel/VBA‑matched Gumbel DDF/IDF")
+st.caption("Dynamic AMS with Excel/VBA‑matched Gumbel")
 
 with st.sidebar:
-    interval = st.number_input("Data interval (minutes)", min_value=1, value=6)
+    interval = st.number_input(
+        "Data interval (minutes)",
+        min_value=1,
+        value=6
+    )
 
     durations = st.multiselect(
         "Durations (minutes)",
@@ -120,7 +129,7 @@ with st.sidebar:
     selected_T = st.multiselect(
         "Return periods (years)",
         st.session_state.return_periods,
-        default=[2, 5, 10, 20, 30, 50, 100]   # ✅ pre‑selected
+        default=[2, 5, 10, 20, 30, 50, 100]
     )
 
     custom_T = st.text_input("Add custom return periods (years)")
@@ -136,7 +145,7 @@ with st.sidebar:
 
     distributions = st.multiselect(
         "Distributions",
-        ["Gumbel", "GEV", "LP-III", "Lognormal"],
+        ["Gumbel", "GEV", "LP‑III", "Lognormal"],
         default=["Gumbel"]
     )
 
@@ -144,9 +153,9 @@ with st.sidebar:
     btn_ddf = st.button("📐 Compute DDF & IDF")
 
 # =====================================================
-# LOAD DATA
+# Load data
 # =====================================================
-times, rain, used_files = read_rainfall_from_repo()
+times, rain = read_rainfall_from_repo()
 
 # =====================================================
 # AMS
@@ -155,6 +164,7 @@ if btn_ams:
     ams_data = {}
     for d in durations:
         ams_data[d] = compute_ams_vba(times, rain, d, interval)
+
     st.session_state["AMS_DATA"] = ams_data
     ams_df = pd.DataFrame({f"AMS_{d}min": ams_data[d] for d in durations})
     st.dataframe(ams_df.round(2), use_container_width=True)
@@ -179,17 +189,17 @@ if btn_ddf:
                     vals.append(gumbel_excel_q(x, T))
                 elif dist == "GEV":
                     vals.append(gev_q(x, T))
-                elif dist == "LP-III":
+                elif dist == "LP‑III":
                     vals.append(lp3_q(x, T))
                 elif dist == "Lognormal":
                     vals.append(lognormal_q(x, T))
             ddf[d] = vals
 
         ddf_df = pd.DataFrame(ddf, index=selected_T).T.round(2)
+        ddf_df.index.name = "Duration (min)"
         st.markdown("**Rainfall Depth (mm)**")
         st.dataframe(ddf_df, use_container_width=True)
 
         idf_df = ddf_df.div(ddf_df.index.values / 60.0, axis=0).round(2)
         st.markdown("**Rainfall Intensity (mm/hr)**")
         st.dataframe(idf_df, use_container_width=True)
-``
