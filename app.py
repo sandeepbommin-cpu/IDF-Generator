@@ -98,18 +98,31 @@ def lognormal_q(x, T):
 # Alternating Block Method (CORRECT IMPLEMENTATION)
 # =====================================================
 def alternating_block_method_from_ddf(ddf_row, duration_min, timestep_min):
+    """
+    True ABM using DDF-based cumulative depths with interpolation.
+    """
+    # Known DDF points (in minutes)
+    known_times = np.array(ddf_row.index, dtype=float)
+    known_depths = np.array(ddf_row.values, dtype=float)
+
+    # Include origin (0, 0)
+    known_times = np.insert(known_times, 0, 0.0)
+    known_depths = np.insert(known_depths, 0, 0.0)
+
+    # Target times for ABM
     n = int(duration_min / timestep_min)
+    target_times = np.arange(timestep_min, duration_min + timestep_min, timestep_min)
 
-    # cumulative depths at Δt, 2Δt, ..., D
-    cumulative = np.array([ddf_row.loc[i * timestep_min] for i in range(1, n + 1)])
+    # Interpolate cumulative depths
+    cumulative = np.interp(target_times, known_times, known_depths)
 
-    # incremental depths
-    increments = np.diff(np.insert(cumulative, 0, 0))
+    # Incremental depths
+    increments = np.diff(np.insert(cumulative, 0, 0.0))
 
-    # sort blocks descending
+    # Alternating block placement
     blocks = np.sort(increments)[::-1]
-
     hyeto = np.zeros(n)
+
     center = n // 2
     hyeto[center] = blocks[0]
 
