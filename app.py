@@ -5,10 +5,16 @@ import re
 from scipy.stats import pearson3, lognorm
 from lmoments3 import distr
 
-st.set_page_config(page_title="AMS / DDF / IDF / ABM Generator", layout="wide")
+# =====================================================
+# PAGE SETUP
+# =====================================================
+st.set_page_config(
+    page_title="AMS / DDF / IDF / HEC‑HMS Frequency Storm",
+    layout="wide"
+)
 
 # =====================================================
-# CONSTANTS
+# CONSTANTS (Excel / VBA Gumbel)
 # =====================================================
 EULER_GAMMA = 0.5772156649
 SIGMA_Y = 1.28255
@@ -19,12 +25,7 @@ SIGMA_Y = 1.28255
 def parse_custom_values(text):
     if not text.strip():
         return []
-    vals = []
-    for v in text.split(","):
-        v = v.strip()
-        if v.isdigit():
-            vals.append(int(v))
-    return sorted(set(vals))
+    return sorted({int(v.strip()) for v in text.split(",") if v.strip().isdigit()})
 
 def sort_files_by_numeric_suffix(files):
     def extract_index(f):
@@ -33,7 +34,7 @@ def sort_files_by_numeric_suffix(files):
     return sorted(files, key=extract_index)
 
 # =====================================================
-# READ RAINFALL DATA (UPLOAD ONLY – ROW ORDER PRESERVED)
+# READ RAINFALL DATA (UPLOAD ONLY, ORDER PRESERVED)
 # =====================================================
 @st.cache_data(show_spinner="Reading uploaded rainfall data...")
 def read_rainfall_from_upload(files):
@@ -80,7 +81,7 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
     return np.array(list(ams.values()), dtype=float)
 
 # =====================================================
-# DISTRIBUTIONS
+# DISTRIBUTIONS (FOR DDF)
 # =====================================================
 def gumbel_excel_q(x, T):
     mean = x.mean()
@@ -102,60 +103,113 @@ def lognormal_q(x, T):
     return lognorm.ppf(1 - 1 / T, shape, loc, scale)
 
 # =====================================================
-# TRUE ABM (DDF‑BASED WITH INTERPOLATION)
+# ✅ HEC‑HMS FREQUENCY STORM (NESTED / BALANCED ABM)
 # =====================================================
-def abm_from_ddf(ddf_row, duration_min, timestep_min):
-    times_known = np.insert(np.array(ddf_row.index, dtype=float), 0, 0.0)
-    depth_known = np.insert(np.array(ddf_row.values, dtype=float), 0, 0.0)
+def hms_frequency_storm(
+    ddf_row: pd.Series,
+    timestep_min: int,
+    peak_position: float = 0.5
+):
+    """
+    HEC-HMS Frequency Storm (Nested / Balanced Storm)
 
-    t = np.arange(timestep_min, duration_min + timestep_min, timestep_min)
-    cumulative = np.interp(t, times_known, depth_known)
-    inc = np.diff(np.insert(cumulative, 0, 0.0))
+    ddf_row:
+        pandas Series
+        index = durations (min), ascending
+        values = cumulative depths (mm) for ONE return period
 
-    blocks = np.sort(inc)[::-1]
-    h = np.zeros(len(inc))
-    c = len(h) // 2
-    h[c] = blocks[0]
+    timestep_min:
+        model timestep (e.g., 6)
 
-    left, right = c - 1, c + 1
-    for i in range(1, len(blocks)):
-        if i % 2 == 1 and right < len(h):
-            h[right] = blocks[i]
+    peak_position:
+        fraction of storm duration (default = 0.5)
+    """
+
+    # --- Sort by duration ---
+    durations = np.array(sorted(ddf_row.index), dtype=int)
+    depths = np.array(ddf_row.loc[durations], dtype=float)
+
+    # --- Nested increments ---
+    inc_depths = np.diff(np.insert(depths, 0, 0.0))
+    inc_durations = np.diff(np.insert(durations, 0, 0))
+
+    # --- Expand increments uniformly ---
+    blocks = []
+    for d_inc, t_inc in zip(inc_depths, inc_durations):
+        n = int(t_inc / timestep_min)
+        blocks.extend([d_inc / n] * n)
+
+    blocks = np.array(blocks)
+
+    # --- Peak-centered placement (shell logic) ---
+    n_blocks = len(blocks)
+    peak_idx = int(n_blocks * peak_position)
+
+    hyeto = np.zeros(n_blocks)
+    hyeto[peak_idx] = blocks[0]
+
+    left, right = peak_idx - 1, peak_idx + 1
+    i = 1
+    while i < n_blocks:
+        if right < n_blocks:
+            hyeto[right] = blocks[i]
+            i += 1
             right += 1
-        elif left >= 0:
-            h[left] = blocks[i]
+        if i < n_blocks and left >= 0:
+            hyeto[left] = blocks[i]
+            i += 1
             left -= 1
 
-    return h.round(2)
+    time = np.arange(
+        timestep_min,
+        timestep_min * (n_blocks + 1),
+        timestep_min
+    )
+
+    df = pd.DataFrame({
+        "Time (min)": time,
+        "Incremental Rainfall (mm)": np.round(hyeto, 3)
+    })
+    df["Cumulative Rainfall (mm)"] = df["Incremental Rainfall (mm)"].cumsum().round(3)
+
+    return df
 
 # =====================================================
 # UI
 # =====================================================
-st.title("🌧️ AMS / DDF / IDF / ABM Generator")
+st.title("🌧️ AMS / DDF / IDF / HEC‑HMS Frequency Storm")
 
 with st.sidebar:
-    interval = st.number_input("Data interval (minutes)", min_value=1, value=6)
 
-    # Durations
-    st.markdown("### Durations (minutes)")
-    predefined_dur = [5, 10, 15, 30, 60, 120, 360, 720, 1440]
-    sel_dur_pre = st.multiselect("Select from list", predefined_dur, default=[30, 60, 120])
-    sel_dur_custom = parse_custom_values(
-        st.text_input("Add custom durations", placeholder="e.g. 45, 90")
+    interval = st.number_input(
+        "Data interval / timestep (minutes)",
+        min_value=1,
+        value=6
     )
-    durations = sorted(set(sel_dur_pre + sel_dur_custom))
+
+    # ---- Durations ----
+    st.markdown("### Durations (minutes)")
+    predefined_dur = [6, 30, 60, 120, 360, 720, 1440]
+    durations = sorted(
+        st.multiselect(
+            "Select from list",
+            predefined_dur,
+            default=predefined_dur
+        )
+    )
     st.info(f"✅ Durations used: {durations}")
 
-    # Return periods
+    # ---- Return Periods ----
     st.markdown("### Return periods (years)")
     predefined_T = [2, 5, 10, 20, 30, 50, 100]
-    sel_T_pre = st.multiselect("Select from list", predefined_T, default=[10])
-    sel_T_custom = parse_custom_values(
-        st.text_input("Add custom return periods", placeholder="e.g. 25, 75")
+    selected_T = st.multiselect(
+        "Select from list",
+        predefined_T,
+        default=[10]
     )
-    Tvals = sorted(set(sel_T_pre + sel_T_custom))
-    st.info(f"✅ Return periods used: {Tvals}")
+    st.info(f"✅ Return periods used: {selected_T}")
 
+    # ---- Distributions ----
     distributions = st.multiselect(
         "Distributions for DDF / IDF",
         ["Gumbel", "GEV", "LP-III", "Lognormal"],
@@ -168,16 +222,9 @@ with st.sidebar:
         accept_multiple_files=True
     )
 
-    st.divider()
-
-    abm_dist = st.selectbox("ABM distribution", distributions)
-    abm_dur = st.multiselect("ABM durations", durations, default=durations[:1])
-    abm_T = st.multiselect("ABM return periods", Tvals, default=Tvals[:1])
-
     btn_ams = st.button("Compute AMS")
     btn_ddf = st.button("Compute DDF / IDF")
-    btn_abm_tables = st.button("Compute ABM Tables")
-    btn_abm_plots = st.button("Show ABM Hyetographs")
+    btn_hms = st.button("Compute HEC‑HMS Frequency Storm")
 
 # =====================================================
 # REQUIRE DATA
@@ -195,18 +242,20 @@ times, rain = read_rainfall_from_upload(files)
 if btn_ams:
     AMS = {d: compute_ams_vba(times, rain, d, interval) for d in durations}
     st.session_state["AMS"] = AMS
-    st.subheader("📊 AMS")
+    st.subheader("📊 Annual Maximum Series (AMS)")
     st.dataframe(pd.DataFrame(AMS).round(2))
 
 # =====================================================
 # DDF / IDF
 # =====================================================
 if btn_ddf:
+
     if "AMS" not in st.session_state:
         st.warning("Compute AMS first.")
         st.stop()
 
     DDF = {}
+
     for dist in distributions:
         table = {}
         for d, x in st.session_state["AMS"].items():
@@ -215,10 +264,10 @@ if btn_ddf:
                 else gev_q(x, T) if dist == "GEV"
                 else lp3_q(x, T) if dist == "LP-III"
                 else lognormal_q(x, T)
-                for T in Tvals
+                for T in selected_T
             ]
 
-        df = pd.DataFrame(table, index=Tvals).T.round(2)
+        df = pd.DataFrame(table, index=selected_T).T.round(2)
         DDF[dist] = df
 
         st.subheader(f"📐 DDF – {dist} (mm)")
@@ -230,44 +279,28 @@ if btn_ddf:
     st.session_state["DDF"] = DDF
 
 # =====================================================
-# ABM TABLES
+# ✅ HEC‑HMS FREQUENCY STORM
 # =====================================================
-if btn_abm_tables:
+if btn_hms:
+
     if "DDF" not in st.session_state:
         st.warning("Compute DDF first.")
         st.stop()
 
-    ABM = {}
-    ddf_sel = st.session_state["DDF"][abm_dist]
+    for dist, ddf_df in st.session_state["DDF"].items():
+        st.subheader(f"🌧️ HEC‑HMS Frequency Storm – {dist}")
 
-    for d in abm_dur:
-        for T in abm_T:
-            h = abm_from_ddf(ddf_sel.loc[d], d, interval)
-            t = np.arange(interval, d + interval, interval)
+        for T in selected_T:
+            st.markdown(f"**Return period = {T} years**")
 
-            df = pd.DataFrame({
-                "Time (min)": t,
-                "Incremental Rainfall (mm)": h,
-                "Cumulative Rainfall (mm)": np.cumsum(h).round(2)
-            })
+            storm = hms_frequency_storm(
+                ddf_row=ddf_df[T],
+                timestep_min=interval,
+                peak_position=0.5
+            )
 
-            ABM[(d, T)] = df
-            st.subheader(f"ABM Table – {d} min, T={T} yr ({abm_dist})")
-            st.dataframe(df)
-
-    st.session_state["ABM"] = ABM
-
-# =====================================================
-# ABM HYETOGRAPHS (PLOTS ONLY WHEN REQUESTED)
-# =====================================================
-if btn_abm_plots:
-    if "ABM" not in st.session_state:
-        st.warning("Compute ABM tables first.")
-        st.stop()
-
-    for (d, T), df in st.session_state["ABM"].items():
-        st.subheader(f"ABM Hyetograph – {d} min, T={T} yr ({abm_dist})")
-        st.bar_chart(
-            df.set_index("Time (min)")["Incremental Rainfall (mm)"],
-            height=300
-        )
+            st.dataframe(storm)
+            st.bar_chart(
+                storm.set_index("Time (min)")["Incremental Rainfall (mm)"],
+                height=300
+            )
