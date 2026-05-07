@@ -1,106 +1,43 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import re
-import pathlib
 from scipy.stats import pearson3, lognorm
 from lmoments3 import distr
 
-st.set_page_config(page_title="AMS / DDF / IDF Generator", layout="wide")
+st.set_page_config(
+    page_title="DDF / IDF Generator (AMS Frozen)",
+    layout="wide"
+)
 
-DATA_DIR = pathlib.Path("data")
-
-# =========================
-# Constants (VBA / Excel)
-# =========================
+# =====================================================
+# CONSTANTS (Excel / VBA Gumbel)
+# =====================================================
 EULER_GAMMA = 0.5772156649015329
-GUMBEL_SD_FACTOR = np.sqrt(6) / np.pi  # ≈ 1.28255
-DATA_INTERVAL_MIN = 6
-FROZEN_DURATIONS = [30, 60, 120, 360, 720, 1440]
+GUMBEL_SD_FACTOR = np.sqrt(6) / np.pi  # 1.28255
 
-# =========================
-# File sorting by _1, _2, ...
-# =========================
-def sort_files_by_numeric_suffix(files):
-    def extract_index(p):
-        m = re.search(r'_(\d+)', p.name)
-        return int(m.group(1)) if m else float("inf")
-    return sorted(files, key=extract_index)
+# =====================================================
+# HARD-CODED AMS (AUTHORITATIVE, VERIFIED)
+# =====================================================
+AMS_DATA = {
+    30:   [18.8, 19.6, 20.4, 15.6, 12.2, 16.8, 12.4, 15.8, 12.8,  7.8, 15.4, 12.2, 19.2, 16.4, 18.4],
+    60:   [25.2, 36.8, 27.6, 19.0, 15.2, 17.6, 16.4, 21.8, 13.6, 11.2, 15.6, 15.8, 33.0, 18.4, 31.6],
+    120:  [29.0, 56.0, 40.0, 21.2, 18.0, 21.6, 18.6, 22.6, 15.4, 11.6, 18.4, 24.59, 55.4, 18.6, 39.6],
+    360:  [36.4, 60.0, 45.6, 28.8, 21.0, 39.4, 26.2, 32.2, 23.6, 19.8, 34.4, 46.01, 64.2, 36.8, 58.6],
+    720:  [60.6, 95.6, 53.2, 31.2, 31.2, 39.4, 26.6, 46.2, 28.0, 22.6, 34.75, 57.67, 64.2, 43.8, 66.0],
+    1440: [70.8,104.6, 64.2, 34.4, 33.4, 42.6, 28.8, 70.2, 28.0, 24.8, 48.4, 66.37, 71.0, 54.6, 94.2]
+}
 
-# =========================
-# Read rainfall from repository
-# =========================
-@st.cache_data(show_spinner="Reading rainfall data from repository...")
-def read_rainfall_from_repo():
-    files = list(DATA_DIR.glob("*.csv")) + list(DATA_DIR.glob("*.xlsx"))
-    if not files:
-        raise RuntimeError("No rainfall files found in data/ directory")
+DURATIONS = list(AMS_DATA.keys())
 
-    files = sort_files_by_numeric_suffix(files)
-
-    all_times, all_rain = [], []
-
-    for f in files:
-        df = pd.read_csv(f) if f.suffix.lower() == ".csv" else pd.read_excel(f)
-        df.columns = df.columns.str.lower()
-
-        time_col = next(c for c in df.columns if "time" in c or "date" in c)
-        rain_col = next(c for c in df.columns if "rain" in c)
-
-        t = pd.to_datetime(df[time_col], errors="coerce")
-        r = pd.to_numeric(df[rain_col], errors="coerce")
-
-        mask = t.notna() & r.notna()
-        all_times.append(t[mask])
-        all_rain.append(r[mask])
-
-    times = pd.concat(all_times, ignore_index=True).to_numpy()
-    rain = pd.concat(all_rain, ignore_index=True).to_numpy()
-
-    return times, rain, files
-
-# =========================
-# AMS (VBA-compatible)
-# =========================
-def compute_ams_vba(times, rain, duration_min):
-    window = int(duration_min / DATA_INTERVAL_MIN)
-    n = len(rain)
-
-    years = pd.DatetimeIndex(times).year.to_numpy()
-    cumsum = np.zeros(n + 1)
-    cumsum[1:] = np.cumsum(rain)
-
-    ams = {}
-    for i in range(window - 1, n):
-        wsum = cumsum[i + 1] - cumsum[i + 1 - window]
-        yr = int(years[i])
-
-        if yr not in ams:
-            ams[yr] = wsum
-        else:
-            if wsum > ams[yr]:
-                ams[yr] = wsum
-
-    return np.array(list(ams.values()), dtype=float)
-
-# =========================
-# Distributions
-# =========================
+# =====================================================
+# DISTRIBUTIONS
+# =====================================================
 def gumbel_vba_q(x, T):
-    """
-    EXACT Excel/VBA Gumbel:
-    - mean: sample mean
-    - std : sample std (STDEV.S => ddof=1)
-    - reduced variate: -ln( ln( T / (T-1) ) )
-    """
     x = np.asarray(x, dtype=float)
-
     mu = x.mean()
-    s = x.std(ddof=1)          # sample std (n-1)
-
+    s = x.std(ddof=1)           # STDEV.S
     beta = s / GUMBEL_SD_FACTOR
     alpha = mu - EULER_GAMMA * beta
-
     yT = -np.log(np.log(T / (T - 1.0)))
     return alpha + beta * yT
 
@@ -117,37 +54,28 @@ def lognormal_q(x, T):
     shape, loc, scale = lognorm.fit(x, floc=0)
     return lognorm.ppf(1 - 1 / T, shape, loc, scale)
 
-# =========================
-# Load data & freeze AMS
-# =========================
-times, rain, used_files = read_rainfall_from_repo()
-
-if "AMS_DATA" not in st.session_state:
-    st.session_state["AMS_DATA"] = {}
-    for d in FROZEN_DURATIONS:
-        st.session_state["AMS_DATA"][d] = compute_ams_vba(times, rain, d)
-
-# =========================
+# =====================================================
 # UI
-# =========================
-st.title("🌧️ AMS / DDF / IDF Generator")
-st.caption("AMS frozen for testing; DDF/IDF derived from AMS (Excel‑matched Gumbel)")
+# =====================================================
+st.title("🌧️ DDF / IDF Generator")
+st.caption("AMS frozen; Excel/VBA‑matched Gumbel implementation")
 
 with st.sidebar:
     st.header("Return periods")
 
     if "return_periods" not in st.session_state:
-        st.session_state["return_periods"] = [2, 5, 10, 20, 50, 100]
+        # ✅ 30-year added here
+        st.session_state.return_periods = [2, 5, 10, 20, 30, 50, 100]
 
     selected_freqs = st.multiselect(
         "Return periods (years)",
-        st.session_state["return_periods"],
-        default=[2, 10, 50, 100]
+        st.session_state.return_periods,
+        default=[2, 10, 30, 50, 100]
     )
 
     custom_freq_text = st.text_input(
         "Add custom return periods",
-        placeholder="e.g. 25, 30"
+        placeholder="e.g. 25, 75"
     )
 
     if custom_freq_text:
@@ -155,9 +83,9 @@ with st.sidebar:
             f = f.strip()
             if f.isdigit():
                 fv = int(f)
-                if fv not in st.session_state["return_periods"]:
-                    st.session_state["return_periods"].append(fv)
-        st.session_state["return_periods"] = sorted(st.session_state["return_periods"])
+                if fv not in st.session_state.return_periods:
+                    st.session_state.return_periods.append(fv)
+        st.session_state.return_periods = sorted(st.session_state.return_periods)
 
     distributions = st.multiselect(
         "Distributions",
@@ -167,36 +95,37 @@ with st.sidebar:
 
     run_button = st.button("📐 Compute DDF & IDF")
 
-st.sidebar.markdown("**Rainfall files used:**")
-for f in used_files:
-    st.sidebar.write(f.name)
-
-# =========================
+# =====================================================
 # DDF / IDF
-# =========================
+# =====================================================
 if run_button and distributions and selected_freqs:
+
     for dist in distributions:
         st.subheader(f"📐 DDF & IDF – {dist}")
 
         ddf = {}
-        for d in FROZEN_DURATIONS:
-            x = st.session_state["AMS_DATA"][d]
-            values = []
+        for d in DURATIONS:
+            x = np.array(AMS_DATA[d], dtype=float)
+            vals = []
+
             for T in selected_freqs:
                 if dist == "Gumbel":
-                    values.append(gumbel_vba_q(x, T))
+                    vals.append(gumbel_vba_q(x, T))
                 elif dist == "GEV":
-                    values.append(gev_q(x, T))
+                    vals.append(gev_q(x, T))
                 elif dist == "LP-III":
-                    values.append(lp3_q(x, T))
+                    vals.append(lp3_q(x, T))
                 elif dist == "Lognormal":
-                    values.append(lognormal_q(x, T))
-            ddf[d] = values
+                    vals.append(lognormal_q(x, T))
+
+            ddf[d] = vals
 
         ddf_df = pd.DataFrame(ddf, index=selected_freqs).T
+
         st.markdown("**Rainfall Depth (mm)**")
         st.dataframe(ddf_df, use_container_width=True)
 
         idf_df = ddf_df.div(ddf_df.index.values / 60.0, axis=0)
+
         st.markdown("**Rainfall Intensity (mm/hr)**")
         st.dataframe(idf_df, use_container_width=True)
