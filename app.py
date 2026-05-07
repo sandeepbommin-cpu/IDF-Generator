@@ -1,22 +1,17 @@
 import streamlit as st
-import pandas as pd
 import numpy as np
-from scipy.stats import pearson3, lognorm
-from lmoments3 import distr
+import pandas as pd
 
-st.set_page_config(
-    page_title="DDF / IDF Generator (AMS Frozen)",
-    layout="wide"
-)
+st.set_page_config(page_title="DDF / IDF Generator (VBA Matched)", layout="wide")
 
 # =====================================================
 # CONSTANTS (Excel / VBA Gumbel)
 # =====================================================
-EULER_GAMMA = 0.5772156649015329
-GUMBEL_SD_FACTOR = np.sqrt(6) / np.pi  # 1.28255
+EULER_GAMMA = 0.5772156649
+SIGMA_Y = 1.28255   # std dev of reduced variate
 
 # =====================================================
-# HARD-CODED AMS (AUTHORITATIVE, VERIFIED)
+# HARD-CODED AMS (VERIFIED, AUTHORITATIVE)
 # =====================================================
 AMS_DATA = {
     30:   [18.8, 19.6, 20.4, 15.6, 12.2, 16.8, 12.4, 15.8, 12.8,  7.8, 15.4, 12.2, 19.2, 16.4, 18.4],
@@ -30,102 +25,76 @@ AMS_DATA = {
 DURATIONS = list(AMS_DATA.keys())
 
 # =====================================================
-# DISTRIBUTIONS
+# VBA / Excel GUMBEL (FREQUENCY-FACTOR FORM)
 # =====================================================
-def gumbel_vba_q(x, T):
+def gumbel_excel_q(x, T):
+    """
+    EXACT Excel/VBA Gumbel:
+      X_T = mean + K_T * stdev
+      K_T = (y_T - ybar) / sigma_y
+      y_T = -ln( ln( T / (T-1) ) )
+    """
     x = np.asarray(x, dtype=float)
-    mu = x.mean()
-    s = x.std(ddof=1)           # STDEV.S
-    beta = s / GUMBEL_SD_FACTOR
-    alpha = mu - EULER_GAMMA * beta
+
+    xbar = x.mean()                # AVERAGE
+    s = x.std(ddof=1)              # STDEV.S
+
     yT = -np.log(np.log(T / (T - 1.0)))
-    return alpha + beta * yT
+    KT = (yT - EULER_GAMMA) / SIGMA_Y
 
-def gev_q(x, T):
-    lm = distr.gev.lmom_fit(x)
-    return distr.gev.ppf(1 - 1 / T, **lm)
-
-def lp3_q(x, T):
-    lx = np.log(x)
-    params = pearson3.fit(lx)
-    return np.exp(pearson3.ppf(1 - 1 / T, *params))
-
-def lognormal_q(x, T):
-    shape, loc, scale = lognorm.fit(x, floc=0)
-    return lognorm.ppf(1 - 1 / T, shape, loc, scale)
+    return xbar + KT * s
 
 # =====================================================
 # UI
 # =====================================================
 st.title("🌧️ DDF / IDF Generator")
-st.caption("AMS frozen; Excel/VBA‑matched Gumbel implementation")
+st.caption("Gumbel distribution matched exactly to Excel/VBA")
 
 with st.sidebar:
-    st.header("Return periods")
-
     if "return_periods" not in st.session_state:
-        # ✅ 30-year added here
         st.session_state.return_periods = [2, 5, 10, 20, 30, 50, 100]
 
-    selected_freqs = st.multiselect(
+    selected_T = st.multiselect(
         "Return periods (years)",
         st.session_state.return_periods,
         default=[2, 10, 30, 50, 100]
     )
 
-    custom_freq_text = st.text_input(
+    custom_T = st.text_input(
         "Add custom return periods",
         placeholder="e.g. 25, 75"
     )
 
-    if custom_freq_text:
-        for f in custom_freq_text.split(","):
-            f = f.strip()
-            if f.isdigit():
-                fv = int(f)
-                if fv not in st.session_state.return_periods:
-                    st.session_state.return_periods.append(fv)
+    if custom_T:
+        for v in custom_T.split(","):
+            v = v.strip()
+            if v.isdigit():
+                vi = int(v)
+                if vi not in st.session_state.return_periods:
+                    st.session_state.return_periods.append(vi)
         st.session_state.return_periods = sorted(st.session_state.return_periods)
 
-    distributions = st.multiselect(
-        "Distributions",
-        ["Gumbel", "GEV", "LP-III", "Lognormal"],
-        default=["Gumbel"]
-    )
-
-    run_button = st.button("📐 Compute DDF & IDF")
+    run = st.button("📐 Compute DDF & IDF")
 
 # =====================================================
 # DDF / IDF
 # =====================================================
-if run_button and distributions and selected_freqs:
+if run and selected_T:
 
-    for dist in distributions:
-        st.subheader(f"📐 DDF & IDF – {dist}")
+    st.subheader("📐 DDF & IDF – Gumbel (Excel/VBA)")
 
-        ddf = {}
-        for d in DURATIONS:
-            x = np.array(AMS_DATA[d], dtype=float)
-            vals = []
+    ddf = {}
+    for d in DURATIONS:
+        x = np.array(AMS_DATA[d], dtype=float)
+        ddf[d] = [gumbel_excel_q(x, T) for T in selected_T]
 
-            for T in selected_freqs:
-                if dist == "Gumbel":
-                    vals.append(gumbel_vba_q(x, T))
-                elif dist == "GEV":
-                    vals.append(gev_q(x, T))
-                elif dist == "LP-III":
-                    vals.append(lp3_q(x, T))
-                elif dist == "Lognormal":
-                    vals.append(lognormal_q(x, T))
+    ddf_df = pd.DataFrame(ddf, index=selected_T).T
+    ddf_df.index.name = "Duration (min)"
 
-            ddf[d] = vals
+    st.markdown("**Rainfall Depth (mm)**")
+    st.dataframe(ddf_df, use_container_width=True)
 
-        ddf_df = pd.DataFrame(ddf, index=selected_freqs).T
+    idf_df = ddf_df.div(ddf_df.index.values / 60.0, axis=0)
 
-        st.markdown("**Rainfall Depth (mm)**")
-        st.dataframe(ddf_df, use_container_width=True)
-
-        idf_df = ddf_df.div(ddf_df.index.values / 60.0, axis=0)
-
-        st.markdown("**Rainfall Intensity (mm/hr)**")
-        st.dataframe(idf_df, use_container_width=True)
+    st.markdown("**Rainfall Intensity (mm/hr)**")
+    st.dataframe(idf_df, use_container_width=True)
