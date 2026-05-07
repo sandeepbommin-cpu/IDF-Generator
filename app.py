@@ -174,4 +174,3 @@ for dist in distributions:
     idf_df = ddf_df.div(ddf_df.index.values / 60.0, axis=0)
     st.markdown("**Rainfall Intensity (mm/hr)**")
     st.dataframe(idf_df, use_container_width=True)
-``
