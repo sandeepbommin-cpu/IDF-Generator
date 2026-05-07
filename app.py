@@ -132,6 +132,7 @@ def pure_abm(ddf_row, duration_min, timestep):
 def hms_frequency_storm(ddf_row, timestep):
     durations = np.array(sorted(ddf_row.index))
     depths = ddf_row.loc[durations].values
+
     inc = np.diff(np.insert(depths, 0, 0))
     dur = np.diff(np.insert(durations, 0, 0))
 
@@ -143,6 +144,7 @@ def hms_frequency_storm(ddf_row, timestep):
     blocks = np.array(blocks)
     n = len(blocks)
     c = n // 2
+
     h = np.zeros(n)
     h[c] = blocks[0]
 
@@ -209,15 +211,12 @@ with st.sidebar:
 # =====================================================
 # MAIN
 # =====================================================
-data_loaded = False
 if files:
     files = sort_files_by_numeric_suffix(files)
     times, rain = read_rainfall_from_upload(files)
-    data_loaded = True
-    st.success("✅ Rainfall data successfully read.")
 
 # AMS
-if btn_ams and data_loaded:
+if btn_ams and files:
     AMS = {d: compute_ams_vba(times, rain, d, timestep) for d in durations}
     st.session_state["AMS"] = AMS
     st.subheader("📊 Annual Maximum Series (AMS) [mm]")
