@@ -75,7 +75,7 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
 
     for i in range(window - 1, n):
         window_sum = cumsum[i + 1] - cumsum[i + 1 - window]
-        yr = int(years[i])  # END-of-window year
+        yr = int(years[i])  # END-of-window year (VBA logic)
 
         if yr not in ams or window_sum > ams[yr]:
             ams[yr] = window_sum
@@ -86,24 +86,41 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
 # STREAMLIT UI
 # =====================================================
 st.title("🌧️ Annual Maximum Series (AMS)")
-st.caption("Reads rainfall data directly from repository (VBA-compatible)")
+st.caption("Repository-based, VBA-compatible, button-driven AMS tool")
 
 with st.sidebar:
     st.header("Inputs")
+
     interval = st.number_input(
         "Data interval (minutes)",
         min_value=1,
         value=6
     )
 
-    durations = st.multiselect(
-        "Durations (minutes)",
-        [5, 10, 15, 30, 60, 120, 360, 720, 1440],
-        default=[60, 1440]
+    # Predefined duration options (NO default selection)
+    base_durations = [5, 10, 15, 30, 60, 120, 360, 720, 1440]
+
+    selected_durations = st.multiselect(
+        "Select durations (minutes)",
+        base_durations,
+        default=[]
     )
 
+    # Manual duration entry
+    manual_duration = st.number_input(
+        "Add custom duration (minutes)",
+        min_value=1,
+        value=0,
+        step=1
+    )
+
+    if manual_duration > 0 and manual_duration not in selected_durations:
+        st.caption(f"Custom duration {manual_duration} min will be included.")
+
+    compute_button = st.button("✅ Compute AMS")
+
 # =====================================================
-# LOAD RAINFALL DATA
+# LOAD RAINFALL DATA FROM REPOSITORY
 # =====================================================
 try:
     times, rain, used_files = read_rainfall_from_repo()
@@ -111,29 +128,43 @@ except Exception as e:
     st.error(str(e))
     st.stop()
 
-st.sidebar.markdown("**Rainfall files used (in order):**")
+st.sidebar.markdown("**Rainfall files used (order):**")
 for f in used_files:
     st.sidebar.write(f.name)
 
 # =====================================================
-# COMPUTE & DISPLAY AMS
+# COMPUTE AMS (ON BUTTON CLICK)
 # =====================================================
-st.subheader("📊 Annual Maximum Series (AMS)")
+if compute_button:
 
-ams_table = {}
+    # Merge predefined + manual durations
+    durations = selected_durations.copy()
+    if manual_duration > 0:
+        durations.append(manual_duration)
 
-for d in durations:
-    ams_dict = compute_ams_vba(times, rain, d, interval)
-    ams_table[f"{d} min"] = pd.Series(ams_dict)
+    if not durations:
+        st.warning("Please select or enter at least one duration.")
+        st.stop()
 
-ams_df = pd.DataFrame(ams_table)
-ams_df.index.name = "Year"
-ams_df.sort_index(inplace=True)
+    st.subheader("📊 Annual Maximum Series (AMS)")
 
-st.dataframe(ams_df, use_container_width=True)
+    ams_table = {}
 
-st.download_button(
-    "Download AMS CSV",
-    ams_df.to_csv().encode(),
-    "AMS.csv"
-)
+    for d in sorted(set(durations)):
+        ams_dict = compute_ams_vba(times, rain, d, interval)
+        ams_table[f"{d} min"] = pd.Series(ams_dict)
+
+    ams_df = pd.DataFrame(ams_table)
+    ams_df.index.name = "Year"
+    ams_df.sort_index(inplace=True)
+
+    st.dataframe(ams_df, use_container_width=True)
+
+    st.download_button(
+        "Download AMS CSV",
+        ams_df.to_csv().encode(),
+        "AMS.csv"
+    )
+
+else:
+    st.info("Select durations and click **Compute AMS** to generate results.")
