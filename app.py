@@ -48,22 +48,27 @@ def read_rainfall_vba_style(files):
 # =====================================================
 def compute_ams_vba(times, rain, duration_min, interval_min):
     """
-    EXACT VBA logic:
-    - Rolling sum using row order
-    - Year assigned using END of window
+    Optimized VBA-compatible AMS
+    - O(N) time
+    - Preserves row order
+    - Year assigned at END of window
     """
     window = int(duration_min / interval_min)
+    n = len(rain)
+
+    # cumulative sum
+    cumsum = np.zeros(n + 1)
+    cumsum[1:] = np.cumsum(rain)
+
     ams = {}
 
-    for i in range(window - 1, len(rain)):
-        window_sum = rain[i - window + 1 : i + 1].sum()
-        year = times[i].year  # END of window year
+    for i in range(window - 1, n):
+        # rolling sum using prefix sum
+        window_sum = cumsum[i + 1] - cumsum[i + 1 - window]
+        year = times[i].year  # VBA behavior
 
-        if year not in ams:
+        if year not in ams or window_sum > ams[year]:
             ams[year] = window_sum
-        else:
-            if window_sum > ams[year]:
-                ams[year] = window_sum
 
     return ams
 
