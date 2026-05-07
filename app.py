@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import re
 from scipy.stats import pearson3, lognorm
 from lmoments3 import distr
+import re
 
 # =====================================================
 # PAGE SETUP
@@ -66,6 +66,7 @@ def read_rainfall_from_upload(files):
 def compute_ams_vba(times, rain, duration_min, interval_min):
     window = int(duration_min / interval_min)
     years = pd.DatetimeIndex(times).year.to_numpy()
+
     cumsum = np.zeros(len(rain) + 1)
     cumsum[1:] = np.cumsum(rain)
 
@@ -83,7 +84,7 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
 def gumbel_excel_q(x, T):
     mean = x.mean()
     s = x.std(ddof=1)
-    yT = -np.log(np.log(T / (T - 1.0)))
+    yT = -np.log(np.log(T / (T - 1)))
     KT = (yT - EULER_GAMMA) / SIGMA_Y
     return mean + KT * s
 
@@ -101,19 +102,19 @@ def lognormal_q(x, T):
 # =====================================================
 # PURE ABM
 # =====================================================
-def pure_abm(ddf_row, duration_min, timestep_min):
-    times = np.arange(timestep_min, duration_min + timestep_min, timestep_min)
-    cum = np.interp(times, ddf_row.index, ddf_row.values)
+def pure_abm(ddf_row, duration_min, timestep):
+    t = np.arange(timestep, duration_min + timestep, timestep)
+    cum = np.interp(t, ddf_row.index.values, ddf_row.values)
     inc = np.diff(np.insert(cum, 0, 0))
-
     sorted_inc = np.sort(inc)[::-1]
-    h = np.zeros_like(sorted_inc)
+
+    h = np.zeros(len(sorted_inc))
     c = len(h) // 2
     h[c] = sorted_inc[0]
 
     L, R = c - 1, c + 1
     for i in range(1, len(sorted_inc)):
-        if i % 2 and R < len(h):
+        if i % 2 == 1 and R < len(h):
             h[R] = sorted_inc[i]
             R += 1
         elif L >= 0:
@@ -121,32 +122,35 @@ def pure_abm(ddf_row, duration_min, timestep_min):
             L -= 1
 
     return pd.DataFrame({
-        "Time (min)": times,
-        "Incremental Rainfall (mm)": h,
+        "Time (min)": t,
+        "Incremental Rainfall (mm)": np.round(h, 3),
         "Cumulative Rainfall (mm)": np.cumsum(h).round(3)
     })
 
 # =====================================================
-# HEC‑HMS ABM
+# HEC‑HMS FREQUENCY STORM
 # =====================================================
-def hms_frequency_storm(ddf_row, timestep_min):
+def hms_frequency_storm(ddf_row, timestep):
     durations = np.array(sorted(ddf_row.index))
     depths = ddf_row.loc[durations].values
+
     inc = np.diff(np.insert(depths, 0, 0))
     dur = np.diff(np.insert(durations, 0, 0))
 
     blocks = []
     for p, d in zip(inc, dur):
-        blocks.extend([p / (d / timestep_min)] * int(d / timestep_min))
+        n = int(d / timestep)
+        blocks.extend([p / n] * n)
 
     blocks = np.array(blocks)
     n = len(blocks)
     c = n // 2
+
     h = np.zeros(n)
     h[c] = blocks[0]
-
     L, R = c - 1, c + 1
     i = 1
+
     while i < n:
         if R < n:
             h[R] = blocks[i]
@@ -157,7 +161,7 @@ def hms_frequency_storm(ddf_row, timestep_min):
             i += 1
             L -= 1
 
-    time = np.arange(timestep_min, timestep_min * (n + 1), timestep_min)
+    time = np.arange(timestep, timestep * (n + 1), timestep)
     return pd.DataFrame({
         "Time (min)": time,
         "Incremental Rainfall (mm)": np.round(h, 3),
@@ -169,41 +173,104 @@ def hms_frequency_storm(ddf_row, timestep_min):
 # =====================================================
 with st.sidebar:
 
-    # 1️⃣ Upload
+    # 1. Upload rainfall
     files = st.file_uploader(
         "Upload rainfall files",
         type=["csv", "xlsx"],
         accept_multiple_files=True
     )
 
-    # 2️⃣ Interval
-    interval = st.number_input("Data interval (minutes)", 1, value=6)
+    # 2. Timestep
+    timestep = st.number_input("Data interval (minutes)", min_value=1, value=6)
 
-    # 3️⃣ AMS
+    # 3. AMS durations
     st.markdown("### Select durations for AMS computation")
-    predefined_dur = [6, 30, 60, 120, 360, 720, 1440]
-    d1 = st.multiselect("Predefined durations", predefined_dur, default=[30, 60, 120])
-    d2 = parse_custom_values(st.text_input("Add custom durations"))
+    base_dur = [6, 30, 60, 120, 360, 720, 1440]
+    d1 = st.multiselect("Predefined durations (min)", base_dur, default=[30, 60, 120])
+    d2 = parse_custom_values(st.text_input("Add custom durations (comma‑separated)"))
     durations = sorted(set(d1 + d2))
-    st.button("Compute AMS", key="btn_ams")
+    btn_ams = st.button("Compute AMS")
 
-    # 4️⃣ DDF / IDF
+    # 4. DDF / IDF
     st.markdown("### Select return periods for DDF / IDF")
-    r1 = st.multiselect("Predefined return periods", [2, 5, 10, 20, 30, 50, 100], default=[10])
-    r2 = parse_custom_values(st.text_input("Add custom return periods"))
+    r1 = st.multiselect("Predefined return periods (years)", [2, 5, 10, 20, 30, 50, 100], default=[10])
+    r2 = parse_custom_values(st.text_input("Add custom return periods (comma‑separated)"))
     Tvals = sorted(set(r1 + r2))
-    distributions = st.multiselect(
-        "Distributions", ["Gumbel", "GEV", "LP-III", "Lognormal"], default=["Gumbel"]
-    )
-    st.button("Compute DDF / IDF", key="btn_ddf")
+    distributions = st.multiselect("Distributions", ["Gumbel", "GEV", "LP‑III", "Lognormal"], default=["Gumbel"])
+    btn_ddf = st.button("Compute DDF / IDF")
 
-    # 5️⃣ ABM
+    # 5. ABM
     st.markdown("### ABM Generation")
     abm_method = st.radio("ABM Method", ["Pure ABM", "HEC‑HMS"])
     abm_dist = st.selectbox("ABM Distribution", distributions)
-    abm_T = st.multiselect("ABM Return periods", Tvals, default=Tvals[:1])
-    abm_D = st.multiselect("ABM Durations", durations, default=[max(durations)] if durations else [])
+    abm_T = st.multiselect("ABM Return periods", Tvals, default=Tvals[:1] if Tvals else [])
+    abm_D = st.multiselect("ABM Durations (min)", durations, default=[max(durations)] if durations else [])
+    btn_abm = st.button("Compute ABM Tables")
+    btn_plot = st.button("Show ABM Hyetographs")
 
-    st.button("Compute ABM Tables", key="btn_abm")
-    st.button("Show ABM Hyetographs", key="btn_abm_plot")
-``
+# =====================================================
+# MAIN LOGIC
+# =====================================================
+if files:
+    files = sort_files_by_numeric_suffix(files)
+    times, rain = read_rainfall_from_upload(files)
+    st.success("✅ Rainfall data successfully read. Please proceed.")
+
+# AMS
+if btn_ams and files:
+    AMS = {d: compute_ams_vba(times, rain, d, timestep) for d in durations}
+    st.session_state["AMS"] = AMS
+    st.subheader("📊 AMS")
+    st.dataframe(pd.DataFrame(AMS).round(2))
+
+# DDF / IDF
+if btn_ddf:
+    if "AMS" not in st.session_state:
+        st.warning("Compute AMS first.")
+    else:
+        DDF = {}
+        for dist in distributions:
+            tbl = {d: [
+                gumbel_excel_q(st.session_state["AMS"][d], T) if dist == "Gumbel"
+                else gev_q(st.session_state["AMS"][d], T) if dist == "GEV"
+                else lp3_q(st.session_state["AMS"][d], T) if dist == "LP‑III"
+                else lognormal_q(st.session_state["AMS"][d], T)
+                for T in Tvals
+            ] for d in durations}
+
+            ddf = pd.DataFrame(tbl, index=Tvals).T.round(2)
+            DDF[dist] = ddf
+            st.subheader(f"DDF – {dist}")
+            st.dataframe(ddf)
+
+            idf = ddf.div(ddf.index.values / 60, axis=0).round(2)
+            st.subheader(f"IDF – {dist}")
+            st.dataframe(idf)
+
+        st.session_state["DDF"] = DDF
+
+# ABM Tables
+if btn_abm:
+    if "DDF" not in st.session_state:
+        st.warning("Compute DDF first.")
+    else:
+        ABM = {}
+        ddf = st.session_state["DDF"][abm_dist]
+        for T in abm_T:
+            for D in abm_D:
+                row = ddf.loc[ddf.index <= D, T]
+                storm = (
+                    pure_abm(row, D, timestep)
+                    if abm_method == "Pure ABM"
+                    else hms_frequency_storm(row, timestep)
+                )
+                ABM[(abm_method, T, D)] = storm
+                st.subheader(f"{abm_method} – T={T} yr, D={D} min")
+                st.dataframe(storm)
+        st.session_state["ABM"] = ABM
+
+# ABM Plots
+if btn_plot and "ABM" in st.session_state:
+    for (m, T, D), df in st.session_state["ABM"].items():
+        st.subheader(f"{m} Hyetograph – T={T} yr, D={D} min")
+        st.bar_chart(df.set_index("Time (min)")["Incremental Rainfall (mm)"])
