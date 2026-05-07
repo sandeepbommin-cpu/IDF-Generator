@@ -11,15 +11,15 @@ st.set_page_config(page_title="AMS / DDF / IDF Generator", layout="wide")
 DATA_DIR = pathlib.Path("data")
 
 # =========================
-# Constants
+# Constants (VBA / Excel)
 # =========================
 EULER_GAMMA = 0.5772156649015329
-GUMBEL_SD_FACTOR = np.sqrt(6) / np.pi
-FROZEN_DURATIONS = [30, 60, 120, 360, 720, 1440]
+GUMBEL_SD_FACTOR = np.sqrt(6) / np.pi  # ≈ 1.28255
 DATA_INTERVAL_MIN = 6
+FROZEN_DURATIONS = [30, 60, 120, 360, 720, 1440]
 
 # =========================
-# File sorting
+# File sorting by _1, _2, ...
 # =========================
 def sort_files_by_numeric_suffix(files):
     def extract_index(p):
@@ -28,7 +28,7 @@ def sort_files_by_numeric_suffix(files):
     return sorted(files, key=extract_index)
 
 # =========================
-# Read rainfall data
+# Read rainfall from repository
 # =========================
 @st.cache_data(show_spinner="Reading rainfall data from repository...")
 def read_rainfall_from_repo():
@@ -38,8 +38,7 @@ def read_rainfall_from_repo():
 
     files = sort_files_by_numeric_suffix(files)
 
-    all_times = []
-    all_rain = []
+    all_times, all_rain = [], []
 
     for f in files:
         df = pd.read_csv(f) if f.suffix.lower() == ".csv" else pd.read_excel(f)
@@ -78,20 +77,31 @@ def compute_ams_vba(times, rain, duration_min):
 
         if yr not in ams:
             ams[yr] = wsum
-        elif wsum > ams[yr]:
-            ams[yr] = wsum
+        else:
+            if wsum > ams[yr]:
+                ams[yr] = wsum
 
-    return np.array(list(ams.values()))
+    return np.array(list(ams.values()), dtype=float)
 
 # =========================
 # Distributions
 # =========================
-def gumbel_mom_q(x, T):
+def gumbel_vba_q(x, T):
+    """
+    EXACT Excel/VBA Gumbel:
+    - mean: sample mean
+    - std : sample std (STDEV.S => ddof=1)
+    - reduced variate: -ln( ln( T / (T-1) ) )
+    """
+    x = np.asarray(x, dtype=float)
+
     mu = x.mean()
-    sigma = x.std(ddof=0)
-    beta = sigma / GUMBEL_SD_FACTOR
+    s = x.std(ddof=1)          # sample std (n-1)
+
+    beta = s / GUMBEL_SD_FACTOR
     alpha = mu - EULER_GAMMA * beta
-    yT = -np.log(-np.log(1.0 - 1.0 / T))
+
+    yT = -np.log(np.log(T / (T - 1.0)))
     return alpha + beta * yT
 
 def gev_q(x, T):
@@ -121,7 +131,7 @@ if "AMS_DATA" not in st.session_state:
 # UI
 # =========================
 st.title("🌧️ AMS / DDF / IDF Generator")
-st.caption("AMS frozen for testing; DDF/IDF derived from AMS")
+st.caption("AMS frozen for testing; DDF/IDF derived from AMS (Excel‑matched Gumbel)")
 
 with st.sidebar:
     st.header("Return periods")
@@ -143,8 +153,10 @@ with st.sidebar:
     if custom_freq_text:
         for f in custom_freq_text.split(","):
             f = f.strip()
-            if f.isdigit() and int(f) not in st.session_state["return_periods"]:
-                st.session_state["return_periods"].append(int(f))
+            if f.isdigit():
+                fv = int(f)
+                if fv not in st.session_state["return_periods"]:
+                    st.session_state["return_periods"].append(fv)
         st.session_state["return_periods"] = sorted(st.session_state["return_periods"])
 
     distributions = st.multiselect(
@@ -163,7 +175,6 @@ for f in used_files:
 # DDF / IDF
 # =========================
 if run_button and distributions and selected_freqs:
-
     for dist in distributions:
         st.subheader(f"📐 DDF & IDF – {dist}")
 
@@ -171,17 +182,15 @@ if run_button and distributions and selected_freqs:
         for d in FROZEN_DURATIONS:
             x = st.session_state["AMS_DATA"][d]
             values = []
-
             for T in selected_freqs:
                 if dist == "Gumbel":
-                    values.append(gumbel_mom_q(x, T))
+                    values.append(gumbel_vba_q(x, T))
                 elif dist == "GEV":
                     values.append(gev_q(x, T))
                 elif dist == "LP-III":
                     values.append(lp3_q(x, T))
                 elif dist == "Lognormal":
                     values.append(lognormal_q(x, T))
-
             ddf[d] = values
 
         ddf_df = pd.DataFrame(ddf, index=selected_freqs).T
