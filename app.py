@@ -11,10 +11,10 @@ st.set_page_config(page_title="AMS / DDF / IDF / ABM Generator", layout="wide")
 # CONSTANTS (Excel / VBA Gumbel)
 # =====================================================
 EULER_GAMMA = 0.5772156649
-SIGMA_Y = 1.28255  # Std dev of reduced variate
+SIGMA_Y = 1.28255
 
 # =====================================================
-# Helper: sort uploaded files by numeric suffix (_1, _2…)
+# Helper: sort uploaded files by numeric suffix
 # =====================================================
 def sort_files_by_numeric_suffix(files):
     def extract_index(f):
@@ -23,7 +23,7 @@ def sort_files_by_numeric_suffix(files):
     return sorted(files, key=extract_index)
 
 # =====================================================
-# Read rainfall data (UPLOAD ONLY – row order preserved)
+# Read rainfall data (UPLOAD ONLY – VBA-compatible)
 # =====================================================
 @st.cache_data(show_spinner="Reading uploaded rainfall data...")
 def read_rainfall_from_upload(files):
@@ -33,11 +33,11 @@ def read_rainfall_from_upload(files):
         df = pd.read_csv(f) if f.name.lower().endswith(".csv") else pd.read_excel(f)
         df.columns = df.columns.str.lower()
 
-        time_col = next(c for c in df.columns if "time" in c or "date" in c)
-        rain_col = next(c for c in df.columns if "rain" in c)
+        tcol = next(c for c in df.columns if "time" in c or "date" in c)
+        rcol = next(c for c in df.columns if "rain" in c)
 
-        t = pd.to_datetime(df[time_col], errors="coerce")
-        r = pd.to_numeric(df[rain_col], errors="coerce")
+        t = pd.to_datetime(df[tcol], errors="coerce")
+        r = pd.to_numeric(df[rcol], errors="coerce")
 
         mask = t.notna() & r.notna()
         times.append(t[mask])
@@ -49,7 +49,7 @@ def read_rainfall_from_upload(files):
     )
 
 # =====================================================
-# AMS (EXACT VBA LOGIC – SAFE PYTHON)
+# AMS (EXACT VBA LOGIC – SYNTAX SAFE)
 # =====================================================
 def compute_ams_vba(times, rain, duration_min, interval_min):
     window = int(duration_min / interval_min)
@@ -65,8 +65,9 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
 
         if yr not in ams:
             ams[yr] = wsum
-        elif wsum > ams[yr]:
-            ams[yr] = wsum
+        else:
+            if wsum > ams[yr]:
+                ams[yr] = wsum
 
     return np.array(list(ams.values()), dtype=float)
 
@@ -75,7 +76,7 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
 # =====================================================
 def gumbel_excel_q(x, T):
     mean = x.mean()
-    s = x.std(ddof=1)  # STDEV.S
+    s = x.std(ddof=1)
     yT = -np.log(np.log(T / (T - 1.0)))
     KT = (yT - EULER_GAMMA) / SIGMA_Y
     return mean + KT * s
@@ -94,24 +95,28 @@ def lognormal_q(x, T):
     return lognorm.ppf(1 - 1 / T, shape, loc, scale)
 
 # =====================================================
-# Alternating Block Method (ABM)
+# Alternating Block Method (CORRECT IMPLEMENTATION)
 # =====================================================
-def alternating_block_method(total_depth, duration_min, timestep_min):
+def alternating_block_method_from_ddf(ddf_row, duration_min, timestep_min):
     n = int(duration_min / timestep_min)
 
-    cumulative = np.linspace(timestep_min, duration_min, n) / duration_min * total_depth
+    # cumulative depths at Δt, 2Δt, ..., D
+    cumulative = np.array([ddf_row.loc[i * timestep_min] for i in range(1, n + 1)])
+
+    # incremental depths
     increments = np.diff(np.insert(cumulative, 0, 0))
 
+    # sort blocks descending
     blocks = np.sort(increments)[::-1]
-    hyeto = np.zeros(n)
 
+    hyeto = np.zeros(n)
     center = n // 2
     hyeto[center] = blocks[0]
 
     left = center - 1
     right = center + 1
 
-    for i in range(1, len(blocks)):
+    for i in range(1, n):
         if i % 2 == 1 and right < n:
             hyeto[right] = blocks[i]
             right += 1
@@ -127,7 +132,7 @@ def alternating_block_method(total_depth, duration_min, timestep_min):
 st.title("🌧️ AMS / DDF / IDF / ABM Generator")
 
 with st.sidebar:
-    interval = st.number_input("Data interval (minutes)", min_value=1, value=6)
+    interval = st.number_input("Data interval (minutes)", 1, value=6)
 
     durations = st.multiselect(
         "Durations (minutes)",
@@ -135,15 +140,11 @@ with st.sidebar:
         default=[30, 60, 120, 360, 720, 1440]
     )
 
-    return_periods = [2, 5, 10, 20, 30, 50, 100]
-    selected_T = st.multiselect(
-        "Return periods (years)",
-        return_periods,
-        default=return_periods
-    )
+    Tvals = [2, 5, 10, 20, 30, 50, 100]
+    selected_T = st.multiselect("Return Periods", Tvals, default=Tvals)
 
     distributions = st.multiselect(
-        "Distributions for DDF / IDF",
+        "Distributions",
         ["Gumbel", "GEV", "LP-III", "Lognormal"],
         default=["Gumbel"]
     )
@@ -156,29 +157,16 @@ with st.sidebar:
 
     st.divider()
 
-    abm_distribution = st.selectbox(
-        "Distribution for ABM",
-        ["Gumbel", "GEV", "LP-III", "Lognormal"]
-    )
-
-    abm_durations = st.multiselect(
-        "ABM durations (minutes)",
-        [30, 60, 120, 360, 720, 1440],
-        default=[60]
-    )
-
-    abm_T = st.multiselect(
-        "ABM return periods (years)",
-        return_periods,
-        default=[10]
-    )
+    abm_distribution = st.selectbox("ABM Distribution", distributions)
+    abm_durations = st.multiselect("ABM Durations", durations, default=[60])
+    abm_T = st.multiselect("ABM Return Periods", Tvals, default=[10])
 
     btn_ams = st.button("Compute AMS")
     btn_ddf = st.button("Compute DDF / IDF")
     btn_abm = st.button("Compute ABM")
 
 # =====================================================
-# Require rainfall data
+# Require data
 # =====================================================
 if not files:
     st.info("Upload rainfall data to begin.")
@@ -191,16 +179,13 @@ times, rain = read_rainfall_from_upload(files)
 # AMS
 # =====================================================
 if btn_ams:
-    ams_data = {}
-    for d in durations:
-        ams_data[d] = compute_ams_vba(times, rain, d, interval)
-
+    ams_data = {d: compute_ams_vba(times, rain, d, interval) for d in durations}
     st.session_state["AMS_DATA"] = ams_data
     st.subheader("AMS")
     st.dataframe(pd.DataFrame(ams_data).round(2))
 
 # =====================================================
-# DDF / IDF (MULTI-DISTRIBUTION)
+# DDF / IDF (IDF DISPLAY INCLUDED)
 # =====================================================
 if btn_ddf:
     if "AMS_DATA" not in st.session_state:
@@ -227,31 +212,36 @@ if btn_ddf:
         ddf_df = pd.DataFrame(ddf, index=selected_T).T.round(2)
         ddf_store[dist] = ddf_df
 
-        st.subheader(f"DDF – {dist}")
+        st.subheader(f"DDF – {dist} (mm)")
         st.dataframe(ddf_df)
+
+        idf_df = ddf_df.div(ddf_df.index.values / 60.0, axis=0).round(2)
+        st.subheader(f"IDF – {dist} (mm/hr)")
+        st.dataframe(idf_df)
 
     st.session_state["DDF_DATA"] = ddf_store
 
 # =====================================================
-# ABM (USER-SELECTED DISTRIBUTION)
+# ABM (TRUE ABM)
 # =====================================================
 if btn_abm:
     if "DDF_DATA" not in st.session_state:
-        st.warning("Compute DDF / IDF first.")
+        st.warning("Compute DDF first.")
         st.stop()
 
     ddf_sel = st.session_state["DDF_DATA"][abm_distribution]
 
     for d in abm_durations:
         for T in abm_T:
-            depth = ddf_sel.loc[d, T]
-            h = alternating_block_method(depth, d, interval)
+            hyeto = alternating_block_method_from_ddf(
+                ddf_sel.loc[d], d, interval
+            )
 
             df = pd.DataFrame({
                 "Time (min)": np.arange(interval, d + interval, interval),
-                "Incremental Rainfall (mm)": h,
-                "Cumulative Rainfall (mm)": np.cumsum(h).round(2)
+                "Incremental Rainfall (mm)": hyeto,
+                "Cumulative Rainfall (mm)": np.cumsum(hyeto).round(2)
             })
 
-            st.subheader(f"ABM – {d} min, T={T} years, {abm_distribution}")
+            st.subheader(f"ABM – {d} min, T={T} yr ({abm_distribution})")
             st.dataframe(df)
