@@ -8,13 +8,14 @@ st.set_page_config(
 )
 
 # =====================================================
-# VBA-STYLE DATA READER
+# CACHED VBA-STYLE DATA READER
 # =====================================================
-def read_rainfall_vba_style(files):
+@st.cache_data(show_spinner="Reading rainfall data...")
+def read_rainfall_vba_style_cached(files):
     """
     Reads rainfall files in upload order.
     Does NOT sort by time.
-    Skips non-date rows (VBA IsDate behaviour).
+    Skips invalid rows (VBA IsDate behaviour).
     """
     times = []
     rainfall = []
@@ -26,7 +27,6 @@ def read_rainfall_vba_style(files):
             df = pd.read_excel(f)
 
         df.columns = df.columns.str.lower()
-
         time_col = [c for c in df.columns if "time" in c or "date" in c][0]
         rain_col = [c for c in df.columns if "rain" in c][0]
 
@@ -37,37 +37,38 @@ def read_rainfall_vba_style(files):
                 times.append(t)
                 rainfall.append(r)
             except Exception:
-                # mimic VBA IsDate = False
+                # Mimics VBA IsDate = False
                 pass
 
     return np.array(times), np.array(rainfall)
 
 
 # =====================================================
-# VBA-STYLE AMS COMPUTATION
+# OPTIMIZED VBA-STYLE AMS COMPUTATION (O(N))
 # =====================================================
 def compute_ams_vba(times, rain, duration_min, interval_min):
     """
-    Optimized VBA-compatible AMS
-    - O(N) time
-    - Preserves row order
+    Optimized AMS computation:
+    - Rolling window using cumulative sum
+    - Row order preserved
     - Year assigned at END of window
     """
     window = int(duration_min / interval_min)
     n = len(rain)
 
-    # cumulative sum
+    # Prefix sum for fast rolling sums
     cumsum = np.zeros(n + 1)
     cumsum[1:] = np.cumsum(rain)
 
     ams = {}
 
     for i in range(window - 1, n):
-        # rolling sum using prefix sum
         window_sum = cumsum[i + 1] - cumsum[i + 1 - window]
-        year = times[i].year  # VBA behavior
+        year = times[i].year
 
-        if year not in ams or window_sum > ams[year]:
+        if year not in ams:
+            ams[year] = window_sum
+        elif window_sum > ams[year]:
             ams[year] = window_sum
 
     return ams
@@ -77,10 +78,11 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
 # STREAMLIT UI
 # =====================================================
 st.title("🌧️ Annual Maximum Series (AMS)")
-st.caption("VBA-compatible rolling-window AMS generator")
+st.caption("Optimized, VBA-compatible AMS computation")
 
 with st.sidebar:
     st.header("Inputs")
+
     interval = st.number_input(
         "Data interval (minutes)",
         min_value=1,
@@ -94,26 +96,42 @@ with st.sidebar:
     )
 
     files = st.file_uploader(
-        "Upload rainfall data files",
+        "Upload rainfall data files (once)",
         type=["csv", "xlsx"],
         accept_multiple_files=True
     )
 
-if not files:
-    st.info("Upload rainfall data files to generate AMS.")
-    st.stop()
+    if st.button("🔄 Clear rainfall data"):
+        if "rain_data" in st.session_state:
+            del st.session_state["rain_data"]
+        st.cache_data.clear()
+        st.experimental_rerun()
+
 
 # =====================================================
-# PROCESS DATA
+# LOAD / RETRIEVE RAINFALL DATA
 # =====================================================
-times, rain = read_rainfall_vba_style(files)
+if "rain_data" not in st.session_state:
+    st.session_state["rain_data"] = None
+
+if files and st.session_state["rain_data"] is None:
+    times, rain = read_rainfall_vba_style_cached(files)
+    st.session_state["rain_data"] = (times, rain)
+    st.success("Rainfall data loaded and cached.")
+
+if st.session_state["rain_data"] is None:
+    st.info("Upload rainfall files to generate AMS.")
+    st.stop()
+
+times, rain = st.session_state["rain_data"]
 
 if len(rain) == 0:
     st.error("No valid rainfall records found.")
     st.stop()
 
+
 # =====================================================
-# COMPUTE AMS
+# COMPUTE & DISPLAY AMS
 # =====================================================
 st.subheader("📊 Annual Maximum Series (AMS)")
 
