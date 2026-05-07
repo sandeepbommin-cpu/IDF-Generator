@@ -2,38 +2,34 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re
+import matplotlib.pyplot as plt
 from scipy.stats import pearson3, lognorm
 from lmoments3 import distr
 
 st.set_page_config(page_title="AMS / DDF / IDF / ABM Generator", layout="wide")
 
 # =====================================================
-# CONSTANTS (Excel / VBA Gumbel)
+# CONSTANTS
 # =====================================================
 EULER_GAMMA = 0.5772156649
 SIGMA_Y = 1.28255
 
 # =====================================================
-# Helpers
+# HELPERS
 # =====================================================
 def parse_custom_values(text):
     if not text.strip():
         return []
-    vals = []
-    for v in text.split(","):
-        v = v.strip()
-        if v.isdigit():
-            vals.append(int(v))
-    return sorted(set(vals))
+    return sorted({int(v.strip()) for v in text.split(",") if v.strip().isdigit()})
 
 def sort_files_by_numeric_suffix(files):
-    def extract_index(f):
+    def idx(f):
         m = re.search(r'_(\d+)', f.name)
         return int(m.group(1)) if m else float("inf")
-    return sorted(files, key=extract_index)
+    return sorted(files, key=idx)
 
 # =====================================================
-# Read rainfall data (UPLOAD ONLY – row order preserved)
+# READ RAINFALL DATA (UPLOAD ONLY, ORDER PRESERVED)
 # =====================================================
 @st.cache_data(show_spinner="Reading uploaded rainfall data...")
 def read_rainfall_from_upload(files):
@@ -43,6 +39,7 @@ def read_rainfall_from_upload(files):
         df.columns = df.columns.str.lower()
         tcol = next(c for c in df.columns if "time" in c or "date" in c)
         rcol = next(c for c in df.columns if "rain" in c)
+
         t = pd.to_datetime(df[tcol], errors="coerce")
         r = pd.to_numeric(df[rcol], errors="coerce")
         mask = t.notna() & r.notna()
@@ -54,7 +51,7 @@ def read_rainfall_from_upload(files):
     )
 
 # =====================================================
-# AMS (EXACT VBA LOGIC – Python safe)
+# AMS (VBA‑EQUIVALENT, PYTHON SAFE)
 # =====================================================
 def compute_ams_vba(times, rain, duration_min, interval_min):
     window = int(duration_min / interval_min)
@@ -68,9 +65,8 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
         yr = int(years[i])
         if yr not in ams:
             ams[yr] = wsum
-        else:
-            if wsum > ams[yr]:
-                ams[yr] = wsum
+        elif wsum > ams[yr]:
+            ams[yr] = wsum
 
     return np.array(list(ams.values()), dtype=float)
 
@@ -78,19 +74,16 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
 # DISTRIBUTIONS
 # =====================================================
 def gumbel_excel_q(x, T):
-    mean = x.mean()
     s = x.std(ddof=1)
+    mean = x.mean()
     yT = -np.log(np.log(T / (T - 1.0)))
-    KT = (yT - EULER_GAMMA) / SIGMA_Y
-    return mean + KT * s
+    return mean + ((yT - EULER_GAMMA) / SIGMA_Y) * s
 
 def gev_q(x, T):
-    lm = distr.gev.lmom_fit(x)
-    return distr.gev.ppf(1 - 1 / T, **lm)
+    return distr.gev.ppf(1 - 1 / T, **distr.gev.lmom_fit(x))
 
 def lp3_q(x, T):
-    lx = np.log(x)
-    params = pearson3.fit(lx)
+    params = pearson3.fit(np.log(x))
     return np.exp(pearson3.ppf(1 - 1 / T, *params))
 
 def lognormal_q(x, T):
@@ -98,37 +91,31 @@ def lognormal_q(x, T):
     return lognorm.ppf(1 - 1 / T, shape, loc, scale)
 
 # =====================================================
-# ABM (Correct, DDF‑based with interpolation)
+# TRUE ABM (DDF‑BASED, INTERPOLATED)
 # =====================================================
-def alternating_block_method_from_ddf(ddf_row, duration_min, timestep_min):
-    known_times = np.array(ddf_row.index, dtype=float)
-    known_depths = np.array(ddf_row.values, dtype=float)
+def abm_from_ddf(ddf_row, duration_min, timestep_min):
+    times_known = np.insert(np.array(ddf_row.index), 0, 0)
+    depth_known = np.insert(np.array(ddf_row.values), 0, 0)
 
-    known_times = np.insert(known_times, 0, 0.0)
-    known_depths = np.insert(known_depths, 0, 0.0)
+    t = np.arange(timestep_min, duration_min + timestep_min, timestep_min)
+    cumulative = np.interp(t, times_known, depth_known)
+    inc = np.diff(np.insert(cumulative, 0, 0))
 
-    n = int(duration_min / timestep_min)
-    target_times = np.arange(timestep_min, duration_min + timestep_min, timestep_min)
+    blocks = np.sort(inc)[::-1]
+    h = np.zeros(len(inc))
+    c = len(inc) // 2
+    h[c] = blocks[0]
+    left, right = c - 1, c + 1
 
-    cumulative = np.interp(target_times, known_times, known_depths)
-    increments = np.diff(np.insert(cumulative, 0, 0.0))
-
-    blocks = np.sort(increments)[::-1]
-    hyeto = np.zeros(n)
-
-    center = n // 2
-    hyeto[center] = blocks[0]
-    left, right = center - 1, center + 1
-
-    for i in range(1, n):
-        if i % 2 == 1 and right < n:
-            hyeto[right] = blocks[i]
+    for i in range(1, len(blocks)):
+        if i % 2 == 1 and right < len(h):
+            h[right] = blocks[i]
             right += 1
         elif left >= 0:
-            hyeto[left] = blocks[i]
+            h[left] = blocks[i]
             left -= 1
 
-    return hyeto.round(2)
+    return h.round(2)
 
 # =====================================================
 # UI
@@ -136,76 +123,42 @@ def alternating_block_method_from_ddf(ddf_row, duration_min, timestep_min):
 st.title("🌧️ AMS / DDF / IDF / ABM Generator")
 
 with st.sidebar:
+    interval = st.number_input("Data interval (minutes)", 1, value=6)
 
-    interval = st.number_input("Data interval (minutes)", min_value=1, value=6)
-
-    # -------- DURATIONS (Option 1 UI) --------
+    # Durations
     st.markdown("### Durations (minutes)")
-    predefined_durations = [5, 10, 15, 30, 60, 120, 360, 720, 1440]
-    sel_dur_pre = st.multiselect(
-        "Select from list",
-        predefined_durations,
-        default=[30, 60, 120, 360, 720, 1440]
-    )
-    dur_custom_txt = st.text_input(
-        "Add custom durations",
-        placeholder="e.g. 45, 90"
-    )
-    sel_dur_custom = parse_custom_values(dur_custom_txt)
-    durations = sorted(set(sel_dur_pre + sel_dur_custom))
+    dur_pre = [5, 10, 15, 30, 60, 120, 360, 720, 1440]
+    sel_dur = st.multiselect("From list", dur_pre, default=[30, 60, 120])
+    dur_custom = parse_custom_values(st.text_input("Custom durations"))
+    durations = sorted(set(sel_dur + dur_custom))
     st.info(f"✅ Durations used: {durations}")
 
-    # -------- RETURN PERIODS (Option 1 UI) --------
+    # Return periods
     st.markdown("### Return Periods (years)")
-    predefined_T = [2, 5, 10, 20, 30, 50, 100]
-    sel_T_pre = st.multiselect(
-        "Select from list",
-        predefined_T,
-        default=predefined_T
-    )
-    T_custom_txt = st.text_input(
-        "Add custom return periods",
-        placeholder="e.g. 25, 75"
-    )
-    sel_T_custom = parse_custom_values(T_custom_txt)
-    selected_T = sorted(set(sel_T_pre + sel_T_custom))
-    st.info(f"✅ Return periods used: {selected_T}")
+    rp_pre = [2, 5, 10, 20, 30, 50, 100]
+    sel_rp = st.multiselect("From list", rp_pre, default=[10])
+    rp_custom = parse_custom_values(st.text_input("Custom return periods"))
+    Tvals = sorted(set(sel_rp + rp_custom))
+    st.info(f"✅ Return periods used: {Tvals}")
 
-    # -------- Distributions --------
     distributions = st.multiselect(
-        "Distributions for DDF / IDF",
+        "Distributions",
         ["Gumbel", "GEV", "LP-III", "Lognormal"],
         default=["Gumbel"]
     )
 
-    # -------- File upload --------
-    files = st.file_uploader(
-        "Upload rainfall files",
-        type=["csv", "xlsx"],
-        accept_multiple_files=True
-    )
+    files = st.file_uploader("Upload rainfall files", type=["csv", "xlsx"], accept_multiple_files=True)
 
     st.divider()
 
-    # -------- ABM Controls --------
-    abm_distribution = st.selectbox(
-        "Distribution for ABM",
-        distributions
-    )
-    abm_durations = st.multiselect(
-        "ABM durations",
-        durations,
-        default=durations[:1] if durations else []
-    )
-    abm_T = st.multiselect(
-        "ABM return periods",
-        selected_T,
-        default=selected_T[:1] if selected_T else []
-    )
+    abm_dist = st.selectbox("ABM distribution", distributions)
+    abm_dur = st.multiselect("ABM durations", durations, default=durations[:1])
+    abm_T = st.multiselect("ABM return periods", Tvals, default=Tvals[:1])
 
     btn_ams = st.button("Compute AMS")
     btn_ddf = st.button("Compute DDF / IDF")
-    btn_abm = st.button("Compute ABM")
+    btn_abm_tables = st.button("Compute ABM Tables")
+    btn_abm_plots = st.button("Show ABM Hyetographs")
 
 # =====================================================
 # REQUIRE DATA
@@ -221,71 +174,80 @@ times, rain = read_rainfall_from_upload(files)
 # AMS
 # =====================================================
 if btn_ams:
-    ams_data = {d: compute_ams_vba(times, rain, d, interval) for d in durations}
-    st.session_state["AMS_DATA"] = ams_data
-    st.subheader("📊 AMS")
-    st.dataframe(pd.DataFrame(ams_data).round(2))
+    AMS = {d: compute_ams_vba(times, rain, d, interval) for d in durations}
+    st.session_state["AMS"] = AMS
+    st.subheader("AMS")
+    st.dataframe(pd.DataFrame(AMS).round(2))
 
 # =====================================================
 # DDF / IDF
 # =====================================================
 if btn_ddf:
-    if "AMS_DATA" not in st.session_state:
+    if "AMS" not in st.session_state:
         st.warning("Compute AMS first.")
         st.stop()
 
-    ddf_store = {}
-
+    DDF = {}
     for dist in distributions:
-        ddf = {}
-        for d, x in st.session_state["AMS_DATA"].items():
-            vals = []
-            for T in selected_T:
-                if dist == "Gumbel":
-                    vals.append(gumbel_excel_q(x, T))
-                elif dist == "GEV":
-                    vals.append(gev_q(x, T))
-                elif dist == "LP-III":
-                    vals.append(lp3_q(x, T))
-                elif dist == "Lognormal":
-                    vals.append(lognormal_q(x, T))
-            ddf[d] = vals
+        table = {}
+        for d, x in st.session_state["AMS"].items():
+            table[d] = [
+                gumbel_excel_q(x, T) if dist == "Gumbel"
+                else gev_q(x, T) if dist == "GEV"
+                else lp3_q(x, T) if dist == "LP-III"
+                else lognormal_q(x, T)
+                for T in Tvals
+            ]
+        df = pd.DataFrame(table, index=Tvals).T.round(2)
+        DDF[dist] = df
 
-        ddf_df = pd.DataFrame(ddf, index=selected_T).T.round(2)
-        ddf_store[dist] = ddf_df
+        st.subheader(f"DDF – {dist} (mm)")
+        st.dataframe(df)
 
-        st.subheader(f"📐 DDF – {dist} (mm)")
-        st.dataframe(ddf_df)
+        st.subheader(f"IDF – {dist} (mm/hr)")
+        st.dataframe(df.div(df.index / 60.0, axis=0).round(2))
 
-        idf_df = ddf_df.div(ddf_df.index.values / 60.0, axis=0).round(2)
-        st.subheader(f"📐 IDF – {dist} (mm/hr)")
-        st.dataframe(idf_df)
-
-    st.session_state["DDF_DATA"] = ddf_store
+    st.session_state["DDF"] = DDF
 
 # =====================================================
-# ABM
+# ABM TABLES
 # =====================================================
-if btn_abm:
-    if "DDF_DATA" not in st.session_state:
+if btn_abm_tables:
+    if "DDF" not in st.session_state:
         st.warning("Compute DDF first.")
         st.stop()
 
-    ddf_sel = st.session_state["DDF_DATA"][abm_distribution]
+    ABM = {}
+    ddf_sel = st.session_state["DDF"][abm_dist]
 
-    for d in abm_durations:
+    for d in abm_dur:
         for T in abm_T:
-            hyeto = alternating_block_method_from_ddf(
-                ddf_sel.loc[d], d, interval
-            )
-
+            h = abm_from_ddf(ddf_sel.loc[d], d, interval)
+            t = np.arange(interval, d + interval, interval)
             df = pd.DataFrame({
-                "Time (min)": np.arange(interval, d + interval, interval),
-                "Incremental Rainfall (mm)": hyeto,
-                "Cumulative Rainfall (mm)": np.cumsum(hyeto).round(2)
+                "Time (min)": t,
+                "Incremental Rainfall (mm)": h,
+                "Cumulative Rainfall (mm)": np.cumsum(h).round(2)
             })
-
-            st.subheader(
-                f"🌧️ ABM – {d} min, T={T} years ({abm_distribution})"
-            )
+            ABM[(d, T)] = df
+            st.subheader(f"ABM Table – {d} min, T={T} yr ({abm_dist})")
             st.dataframe(df)
+
+    st.session_state["ABM"] = ABM
+
+# =====================================================
+# ABM PLOTS (ONLY WHEN REQUESTED)
+# =====================================================
+if btn_abm_plots:
+    if "ABM" not in st.session_state:
+        st.warning("Compute ABM tables first.")
+        st.stop()
+
+    for (d, T), df in st.session_state["ABM"].items():
+        st.subheader(f"ABM Hyetograph – {d} min, T={T} yr ({abm_dist})")
+        fig, ax = plt.subplots()
+        ax.bar(df["Time (min)"], df["Incremental Rainfall (mm)"], width=interval * 0.8)
+        ax.set_xlabel("Time (min)")
+        ax.set_ylabel("Incremental Rainfall (mm)")
+        ax.set_title("ABM Incremental Rainfall")
+        st.pyplot(fig)
