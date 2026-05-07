@@ -62,14 +62,20 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
     n = len(rain)
 
     years = pd.DatetimeIndex(times).year.to_numpy()
+
     cumsum = np.zeros(n + 1)
     cumsum[1:] = np.cumsum(rain)
 
     ams = {}
     for i in range(window - 1, n):
         window_sum = cumsum[i + 1] - cumsum[i + 1 - window]
-        yr = int(years[i])
-        if yr not in ams or window_sum > amsams[yr] = window_sum
+        yr = int(years[i])  # END-of-window year (VBA behaviour)
+
+        if yr not in ams:
+            ams[yr] = window_sum
+        elif window_sum > ams[yr]:
+            ams[yr] = window_sum
+
     return ams
 
 # =====================================================
