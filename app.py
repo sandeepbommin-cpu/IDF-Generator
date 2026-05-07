@@ -13,12 +13,13 @@ st.set_page_config(
 @st.cache_data(show_spinner="Reading rainfall data...")
 def read_rainfall_vba_style_cached(files):
     """
-    Reads rainfall files in upload order.
-    Does NOT sort by time.
-    Skips invalid rows (VBA IsDate behaviour).
+    FAST, VBA-compatible rainfall reader.
+    - Preserves row order
+    - Skips invalid timestamps
+    - Uses vectorized Pandas ops (no Python loops)
     """
-    times = []
-    rainfall = []
+    all_times = []
+    all_rain = []
 
     for f in files:
         if f.name.lower().endswith(".csv"):
@@ -27,20 +28,26 @@ def read_rainfall_vba_style_cached(files):
             df = pd.read_excel(f)
 
         df.columns = df.columns.str.lower()
-        time_col = [c for c in df.columns if "time" in c or "date" in c][0]
-        rain_col = [c for c in df.columns if "rain" in c][0]
 
-        for _, row in df.iterrows():
-            try:
-                t = pd.to_datetime(row[time_col])
-                r = float(row[rain_col])
-                times.append(t)
-                rainfall.append(r)
-            except Exception:
-                # Mimics VBA IsDate = False
-                pass
+        time_col = next(c for c in df.columns if "time" in c or "date" in c)
+        rain_col = next(c for c in df.columns if "rain" in c)
 
-    return np.array(times), np.array(rainfall)
+        # ✅ Vectorized parsing
+        times = pd.to_datetime(df[time_col], errors="coerce")
+        rain = pd.to_numeric(df[rain_col], errors="coerce")
+
+        mask = times.notna() & rain.notna()
+        times = times[mask]
+        rain = rain[mask]
+
+        all_times.append(times)
+        all_rain.append(rain)
+
+    # ✅ Concatenate once (preserves file + row order)
+    times = pd.concat(all_times, ignore_index=True).to_numpy()
+    rain = pd.concat(all_rain, ignore_index=True).to_numpy()
+
+    return times, rain
 
 
 # =====================================================
