@@ -2,49 +2,48 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re
+import pathlib
 
 st.set_page_config(
     page_title="AMS Generator (VBA-Compatible)",
     layout="wide"
 )
 
+DATA_DIR = pathlib.Path("data")
+
 # =====================================================
-# AUTO-SORT FILES BY NUMERIC SUFFIX (_1, _2, _3, ...)
+# AUTO-SORT FILES BY NUMERIC SUFFIX (_1, _2, ...)
 # =====================================================
-def sort_files_by_numeric_suffix(files):
-    """
-    Sort uploaded files by numeric suffix in filename.
-    Example: Rainfall_Data_1, Rainfall_Data_2, ...
-    Files without a suffix go last.
-    """
-    def extract_index(f):
-        match = re.search(r'_(\d+)', f.name)
+def sort_files_by_numeric_suffix(file_paths):
+    def extract_index(p):
+        match = re.search(r'_(\d+)', p.name)
         return int(match.group(1)) if match else float("inf")
-
-    return sorted(files, key=extract_index)
+    return sorted(file_paths, key=extract_index)
 
 # =====================================================
-# FAST, CACHED, VBA-STYLE RAINFALL READER
+# FAST REPOSITORY-BASED RAINFALL READER
 # =====================================================
-@st.cache_data(show_spinner="Reading rainfall data...")
-def read_rainfall_vba_style_cached(files):
-    """
-    Fast rainfall reader:
-    - Preserves file + row order
-    - Vectorized datetime & numeric parsing
-    - Skips invalid rows (VBA IsDate behaviour)
-    """
+@st.cache_data(show_spinner="Reading rainfall data from repository...")
+def read_rainfall_from_repo():
+    if not DATA_DIR.exists():
+        raise FileNotFoundError("data/ directory not found in repository")
+
+    files = list(DATA_DIR.glob("*.csv")) + list(DATA_DIR.glob("*.xlsx"))
+    if not files:
+        raise FileNotFoundError("No rainfall files found in data/ folder")
+
+    files = sort_files_by_numeric_suffix(files)
+
     all_times = []
     all_rain = []
 
     for f in files:
-        if f.name.lower().endswith(".csv"):
+        if f.suffix.lower() == ".csv":
             df = pd.read_csv(f)
         else:
             df = pd.read_excel(f)
 
         df.columns = df.columns.str.lower()
-
         time_col = next(c for c in df.columns if "time" in c or "date" in c)
         rain_col = next(c for c in df.columns if "rain" in c)
 
@@ -58,25 +57,17 @@ def read_rainfall_vba_style_cached(files):
     times = pd.concat(all_times, ignore_index=True).to_numpy()
     rain = pd.concat(all_rain, ignore_index=True).to_numpy()
 
-    return times, rain
+    return times, rain, files
 
 # =====================================================
-# OPTIMIZED VBA-COMPATIBLE AMS (O(N))
+# OPTIMIZED VBA-COMPATIBLE AMS
 # =====================================================
 def compute_ams_vba(times, rain, duration_min, interval_min):
-    """
-    EXACT VBA semantics:
-    - Rolling window over row order
-    - Year assigned at END of window
-    - O(N) using cumulative sums
-    """
     window = int(duration_min / interval_min)
     n = len(rain)
 
-    # Convert times once to obtain years safely
     years = pd.DatetimeIndex(times).year.to_numpy()
 
-    # Prefix sum for fast rolling sums
     cumsum = np.zeros(n + 1, dtype=float)
     cumsum[1:] = np.cumsum(rain)
 
@@ -84,13 +75,10 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
 
     for i in range(window - 1, n):
         window_sum = cumsum[i + 1] - cumsum[i + 1 - window]
-        year = int(years[i])  # END-of-window year (VBA behaviour)
+        yr = int(years[i])  # END-of-window year
 
-        if year not in ams:
-            ams[year] = window_sum
-        else:
-            if window_sum > ams[year]:
-                ams[year] = window_sum
+        if yr not in ams or window_sum > ams[yr]:
+            ams[yr] = window_sum
 
     return ams
 
@@ -98,11 +86,10 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
 # STREAMLIT UI
 # =====================================================
 st.title("🌧️ Annual Maximum Series (AMS)")
-st.caption("Fast, VBA-compatible AMS generator with auto-sorted inputs")
+st.caption("Reads rainfall data directly from repository (VBA-compatible)")
 
 with st.sidebar:
     st.header("Inputs")
-
     interval = st.number_input(
         "Data interval (minutes)",
         min_value=1,
@@ -115,46 +102,18 @@ with st.sidebar:
         default=[60, 1440]
     )
 
-    files = st.file_uploader(
-        "Upload rainfall data files",
-        type=["csv", "xlsx"],
-        accept_multiple_files=True
-    )
-
-    if st.button("🔄 Clear rainfall data"):
-        st.session_state.pop("rain_data", None)
-        st.cache_data.clear()
-        st.experimental_rerun()
-
 # =====================================================
-# LOAD / REUSE RAINFALL DATA
+# LOAD RAINFALL DATA
 # =====================================================
-if "rain_data" not in st.session_state:
-    st.session_state["rain_data"] = None
-
-if files and st.session_state["rain_data"] is None:
-    # Auto-sort files by numeric suffix
-    files = sort_files_by_numeric_suffix(files)
-
-    # Display detected order (for transparency)
-    with st.sidebar:
-        st.markdown("**Detected file order:**")
-        for f in files:
-            st.write(f.name)
-
-    times, rain = read_rainfall_vba_style_cached(files)
-    st.session_state["rain_data"] = (times, rain)
-    st.success(f"Rainfall data loaded and cached: {len(rain):,} records")
-
-if st.session_state["rain_data"] is None:
-    st.info("Upload rainfall files to compute AMS.")
+try:
+    times, rain, used_files = read_rainfall_from_repo()
+except Exception as e:
+    st.error(str(e))
     st.stop()
 
-times, rain = st.session_state["rain_data"]
-
-if len(rain) == 0:
-    st.error("No valid rainfall records found.")
-    st.stop()
+st.sidebar.markdown("**Rainfall files used (in order):**")
+for f in used_files:
+    st.sidebar.write(f.name)
 
 # =====================================================
 # COMPUTE & DISPLAY AMS
