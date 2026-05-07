@@ -1,11 +1,27 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import re
 
 st.set_page_config(
     page_title="AMS Generator (VBA-Compatible)",
     layout="wide"
 )
+
+# =====================================================
+# AUTO-SORT FILES BY NUMERIC SUFFIX (_1, _2, _3, ...)
+# =====================================================
+def sort_files_by_numeric_suffix(files):
+    """
+    Sort uploaded files by numeric suffix in filename.
+    Example: Rainfall_Data_1, Rainfall_Data_2, ...
+    Files without a suffix go last.
+    """
+    def extract_index(f):
+        match = re.search(r'_(\d+)', f.name)
+        return int(match.group(1)) if match else float("inf")
+
+    return sorted(files, key=extract_index)
 
 # =====================================================
 # FAST, CACHED, VBA-STYLE RAINFALL READER
@@ -14,7 +30,7 @@ st.set_page_config(
 def read_rainfall_vba_style_cached(files):
     """
     Fast rainfall reader:
-    - Preserves upload + row order (no sorting)
+    - Preserves file + row order
     - Vectorized datetime & numeric parsing
     - Skips invalid rows (VBA IsDate behaviour)
     """
@@ -39,39 +55,36 @@ def read_rainfall_vba_style_cached(files):
         all_times.append(times[mask])
         all_rain.append(rain[mask])
 
-    # concatenate once (preserves file order)
     times = pd.concat(all_times, ignore_index=True).to_numpy()
     rain = pd.concat(all_rain, ignore_index=True).to_numpy()
 
     return times, rain
 
-
 # =====================================================
 # OPTIMIZED VBA-COMPATIBLE AMS (O(N))
 # =====================================================
 def compute_ams_vba(times, rain, duration_min, interval_min):
-
     """
-    Optimized, VBA-compatible AMS:
-    - Rolling window using cumulative sum
+    EXACT VBA semantics:
+    - Rolling window over row order
     - Year assigned at END of window
-    - Handles numpy.datetime64 safely
+    - O(N) using cumulative sums
     """
     window = int(duration_min / interval_min)
     n = len(rain)
 
-    # Convert times → pandas datetime index ONCE
-    years = pd.DatetimeIndex(times).year
+    # Convert times once to obtain years safely
+    years = pd.DatetimeIndex(times).year.to_numpy()
 
     # Prefix sum for fast rolling sums
-    cumsum = np.zeros(n + 1)
+    cumsum = np.zeros(n + 1, dtype=float)
     cumsum[1:] = np.cumsum(rain)
 
     ams = {}
 
     for i in range(window - 1, n):
         window_sum = cumsum[i + 1] - cumsum[i + 1 - window]
-        year = int(years[i])  # VBA uses END of window time
+        year = int(years[i])  # END-of-window year (VBA behaviour)
 
         if year not in ams:
             ams[year] = window_sum
@@ -81,12 +94,11 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
 
     return ams
 
-
 # =====================================================
 # STREAMLIT UI
 # =====================================================
 st.title("🌧️ Annual Maximum Series (AMS)")
-st.caption("Fast, VBA-compatible AMS generator")
+st.caption("Fast, VBA-compatible AMS generator with auto-sorted inputs")
 
 with st.sidebar:
     st.header("Inputs")
@@ -104,17 +116,15 @@ with st.sidebar:
     )
 
     files = st.file_uploader(
-        "Upload rainfall data files (once)",
+        "Upload rainfall data files",
         type=["csv", "xlsx"],
         accept_multiple_files=True
     )
 
     if st.button("🔄 Clear rainfall data"):
-        if "rain_data" in st.session_state:
-            del st.session_state["rain_data"]
+        st.session_state.pop("rain_data", None)
         st.cache_data.clear()
         st.experimental_rerun()
-
 
 # =====================================================
 # LOAD / REUSE RAINFALL DATA
@@ -123,9 +133,18 @@ if "rain_data" not in st.session_state:
     st.session_state["rain_data"] = None
 
 if files and st.session_state["rain_data"] is None:
+    # Auto-sort files by numeric suffix
+    files = sort_files_by_numeric_suffix(files)
+
+    # Display detected order (for transparency)
+    with st.sidebar:
+        st.markdown("**Detected file order:**")
+        for f in files:
+            st.write(f.name)
+
     times, rain = read_rainfall_vba_style_cached(files)
     st.session_state["rain_data"] = (times, rain)
-    st.success(f"Rainfall data loaded: {len(rain):,} records")
+    st.success(f"Rainfall data loaded and cached: {len(rain):,} records")
 
 if st.session_state["rain_data"] is None:
     st.info("Upload rainfall files to compute AMS.")
@@ -136,7 +155,6 @@ times, rain = st.session_state["rain_data"]
 if len(rain) == 0:
     st.error("No valid rainfall records found.")
     st.stop()
-
 
 # =====================================================
 # COMPUTE & DISPLAY AMS
