@@ -1,8 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import re
 import pathlib
+import re
 from scipy.stats import pearson3, lognorm
 from lmoments3 import distr
 
@@ -11,73 +11,65 @@ st.set_page_config(page_title="AMS / DDF / IDF Generator", layout="wide")
 DATA_DIR = pathlib.Path("data")
 
 # =====================================================
-# CONSTANTS — Excel / VBA Gumbel
+# CONSTANTS (Excel / VBA Gumbel)
 # =====================================================
 EULER_GAMMA = 0.5772156649
 SIGMA_Y = 1.28255   # Std dev of reduced variate (Excel)
 
 # =====================================================
-# Helper: sort files Rainfall_Data_1, _2, _3 ...
+# File sorting helper (_1, _2, _3...)
 # =====================================================
 def sort_files_by_numeric_suffix(files):
-    def extract_index(p):
-        m = re.search(r'_(\d+)', p.name)
+    def extract_index(f):
+        m = re.search(r'_(\d+)', f.name)
         return int(m.group(1)) if m else float("inf")
     return sorted(files, key=extract_index)
 
 # =====================================================
-# Read rainfall data from repository
+# Read rainfall data (upload or repo)
 # =====================================================
-@st.cache_data(show_spinner="Reading rainfall data from repository...")
-def read_rainfall_from_repo():
-    files = list(DATA_DIR.glob("*.csv")) + list(DATA_DIR.glob("*.xlsx"))
-    if not files:
-        raise RuntimeError("No rainfall files found in data/ directory")
-
-    files = sort_files_by_numeric_suffix(files)
-
-    all_times = []
-    all_rain = []
+@st.cache_data(show_spinner="Reading rainfall data...")
+def read_rainfall(files):
+    all_frames = []
 
     for f in files:
-        df = pd.read_csv(f) if f.suffix.lower() == ".csv" else pd.read_excel(f)
+        df = pd.read_csv(f) if f.name.lower().endswith(".csv") else pd.read_excel(f)
         df.columns = df.columns.str.lower()
 
         time_col = next(c for c in df.columns if "time" in c or "date" in c)
         rain_col = next(c for c in df.columns if "rain" in c)
 
-        t = pd.to_datetime(df[time_col], errors="coerce")
-        r = pd.to_numeric(df[rain_col], errors="coerce")
+        df = df[[time_col, rain_col]].copy()
+        df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
+        df[rain_col] = pd.to_numeric(df[rain_col], errors="coerce")
+        df.dropna(inplace=True)
 
-        mask = t.notna() & r.notna()
-        all_times.append(t[mask])
-        all_rain.append(r[mask])
+        df.columns = ["time", "rain"]
+        all_frames.append(df)
 
-    times = pd.concat(all_times, ignore_index=True).to_numpy()
-    rain = pd.concat(all_rain, ignore_index=True).to_numpy()
+    merged = pd.concat(all_frames, ignore_index=True)
+    merged.sort_values("time", inplace=True)
 
-    return times, rain
+    return merged["time"].to_numpy(), merged["rain"].to_numpy()
 
 # =====================================================
-# AMS — VBA compatible
+# AMS (VBA-compatible)
 # =====================================================
 def compute_ams_vba(times, rain, duration_min, interval_min):
     window = int(duration_min / interval_min)
-    n = len(rain)
-
     years = pd.DatetimeIndex(times).year.to_numpy()
-    cumsum = np.zeros(n + 1)
+
+    cumsum = np.zeros(len(rain) + 1)
     cumsum[1:] = np.cumsum(rain)
 
     ams = {}
-    for i in range(window - 1, n):
-        wsum = cumsum[i + 1] - cumsum[i + 1 - window]
+    for i in range(window - 1, len(rain)):
+        val = cumsum[i + 1] - cumsum[i + 1 - window]
         yr = int(years[i])
-
         if yr not in ams:
-            ams[yr] = wsum
-        elif wsum > ams[yr]:
-            ams[yr] = wsum
+            ams[yr] = val
+        elif val > ams[yr]:
+            ams[yr] = val
 
     return np.array(list(ams.values()), dtype=float)
 
@@ -85,11 +77,11 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
 # Distributions
 # =====================================================
 def gumbel_excel_q(x, T):
-    xbar = x.mean()             # AVERAGE
-    s = x.std(ddof=1)           # STDEV.S
+    mean_x = x.mean()
+    s = x.std(ddof=1)  # STDEV.S
     yT = -np.log(np.log(T / (T - 1.0)))
     KT = (yT - EULER_GAMMA) / SIGMA_Y
-    return xbar + KT * s
+    return mean_x + KT * s
 
 def gev_q(x, T):
     lm = distr.gev.lmom_fit(x)
@@ -108,14 +100,9 @@ def lognormal_q(x, T):
 # UI
 # =====================================================
 st.title("🌧️ AMS / DDF / IDF Generator")
-st.caption("Dynamic AMS with Excel/VBA‑matched Gumbel")
 
 with st.sidebar:
-    interval = st.number_input(
-        "Data interval (minutes)",
-        min_value=1,
-        value=6
-    )
+    interval = st.number_input("Data interval (minutes)", min_value=1, value=6)
 
     durations = st.multiselect(
         "Durations (minutes)",
@@ -133,29 +120,41 @@ with st.sidebar:
     )
 
     custom_T = st.text_input("Add custom return periods (years)")
-
     if custom_T:
-        for v in custom_T.split(","):
-            v = v.strip()
-            if v.isdigit():
-                iv = int(v)
-                if iv not in st.session_state.return_periods:
-                    st.session_state.return_periods.append(iv)
+        for t in custom_T.split(","):
+            t = t.strip()
+            if t.isdigit() and int(t) not in st.session_state.return_periods:
+                st.session_state.return_periods.append(int(t))
         st.session_state.return_periods = sorted(st.session_state.return_periods)
 
     distributions = st.multiselect(
         "Distributions",
-        ["Gumbel", "GEV", "LP‑III", "Lognormal"],
+        ["Gumbel", "GEV", "LP-III", "Lognormal"],
         default=["Gumbel"]
+    )
+
+    files = st.file_uploader(
+        "Upload rainfall files (CSV or Excel)",
+        type=["csv", "xlsx"],
+        accept_multiple_files=True
     )
 
     btn_ams = st.button("✅ Compute AMS")
     btn_ddf = st.button("📐 Compute DDF & IDF")
 
 # =====================================================
-# Load data
+# Load rainfall data
 # =====================================================
-times, rain = read_rainfall_from_repo()
+if files:
+    files = sort_files_by_numeric_suffix(files)
+else:
+    repo_files = list(DATA_DIR.glob("*.csv")) + list(DATA_DIR.glob("*.xlsx"))
+    if not repo_files:
+        st.error("No rainfall files uploaded or found in data/ folder.")
+        st.stop()
+    files = sort_files_by_numeric_suffix(repo_files)
+
+times, rain = read_rainfall(files)
 
 # =====================================================
 # AMS
@@ -173,9 +172,8 @@ if btn_ams:
 # DDF / IDF
 # =====================================================
 if btn_ddf:
-
     if "AMS_DATA" not in st.session_state:
-        st.warning("Please compute AMS first.")
+        st.warning("Compute AMS first.")
         st.stop()
 
     for dist in distributions:
@@ -189,14 +187,13 @@ if btn_ddf:
                     vals.append(gumbel_excel_q(x, T))
                 elif dist == "GEV":
                     vals.append(gev_q(x, T))
-                elif dist == "LP‑III":
+                elif dist == "LP-III":
                     vals.append(lp3_q(x, T))
                 elif dist == "Lognormal":
                     vals.append(lognormal_q(x, T))
             ddf[d] = vals
 
         ddf_df = pd.DataFrame(ddf, index=selected_T).T.round(2)
-        ddf_df.index.name = "Duration (min)"
         st.markdown("**Rainfall Depth (mm)**")
         st.dataframe(ddf_df, use_container_width=True)
 
