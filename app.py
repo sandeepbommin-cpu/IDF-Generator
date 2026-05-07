@@ -50,16 +50,20 @@ def read_rainfall_vba_style_cached(files):
 # OPTIMIZED VBA-COMPATIBLE AMS (O(N))
 # =====================================================
 def compute_ams_vba(times, rain, duration_min, interval_min):
+
     """
-    EXACT VBA semantics:
-    - Rolling over row order
+    Optimized, VBA-compatible AMS:
+    - Rolling window using cumulative sum
     - Year assigned at END of window
-    - O(N) using cumulative sums
+    - Handles numpy.datetime64 safely
     """
     window = int(duration_min / interval_min)
     n = len(rain)
 
-    # cumulative sum for fast rolling windows
+    # Convert times → pandas datetime index ONCE
+    years = pd.DatetimeIndex(times).year
+
+    # Prefix sum for fast rolling sums
     cumsum = np.zeros(n + 1)
     cumsum[1:] = np.cumsum(rain)
 
@@ -67,7 +71,7 @@ def compute_ams_vba(times, rain, duration_min, interval_min):
 
     for i in range(window - 1, n):
         window_sum = cumsum[i + 1] - cumsum[i + 1 - window]
-        year = times[i].year
+        year = int(years[i])  # VBA uses END of window time
 
         if year not in ams:
             ams[year] = window_sum
